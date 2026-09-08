@@ -1057,6 +1057,145 @@ func TestStartWorkloadAppliesLabelsToPodAndPVC(t *testing.T) {
 	}
 }
 
+func TestStartWorkloadHonorsVolumeSizeAndStorageClass(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	server := New(Options{
+		Clientset:   clientset,
+		Namespace:   "default",
+		StorageSize: "1Gi",
+		Catalog: config.Catalog{StorageClasses: []config.StorageClassEntry{
+			{Name: "fast", StorageClassName: "fast-ssd"},
+			{Name: "standard", StorageClassName: ""},
+		}},
+		Logger: zap.NewNop(),
+	})
+
+	ctx := context.Background()
+	resp, err := server.StartWorkload(ctx, &runnerv1.StartWorkloadRequest{
+		Main: &runnerv1.ContainerSpec{Name: "main", Image: "busybox"},
+		Volumes: []*runnerv1.VolumeSpec{
+			{
+				Name:           "data",
+				Kind:           runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+				PersistentName: "pvc-sized",
+				Size:           "5Gi",
+				StorageClass:   "fast",
+			},
+			{
+				Name:           "scratch",
+				Kind:           runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+				PersistentName: "pvc-default",
+			},
+			{
+				Name:           "shared",
+				Kind:           runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+				PersistentName: "pvc-cluster-default",
+				StorageClass:   "standard",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartWorkload returned error: %v", err)
+	}
+	if resp == nil || resp.Id == "" {
+		t.Fatalf("expected response with id")
+	}
+
+	sized, err := clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, "pvc-sized", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected pvc created: %v", err)
+	}
+	if got := sized.Spec.Resources.Requests[corev1.ResourceStorage]; got.String() != "5Gi" {
+		t.Fatalf("expected 5Gi storage request, got %s", got.String())
+	}
+	if sized.Spec.StorageClassName == nil || *sized.Spec.StorageClassName != "fast-ssd" {
+		t.Fatalf("expected storage class fast-ssd, got %v", sized.Spec.StorageClassName)
+	}
+
+	fallback, err := clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, "pvc-default", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected pvc created: %v", err)
+	}
+	if got := fallback.Spec.Resources.Requests[corev1.ResourceStorage]; got.String() != "1Gi" {
+		t.Fatalf("expected 1Gi storage request, got %s", got.String())
+	}
+	if fallback.Spec.StorageClassName != nil {
+		t.Fatalf("expected no storage class, got %q", *fallback.Spec.StorageClassName)
+	}
+
+	clusterDefault, err := clientset.CoreV1().PersistentVolumeClaims("default").Get(ctx, "pvc-cluster-default", metav1.GetOptions{})
+	if err != nil {
+		t.Fatalf("expected pvc created: %v", err)
+	}
+	if clusterDefault.Spec.StorageClassName != nil {
+		t.Fatalf("expected cluster default storage class, got %q", *clusterDefault.Spec.StorageClassName)
+	}
+}
+
+func TestStartWorkloadRejectsUnknownStorageClass(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	server := New(Options{
+		Clientset:   clientset,
+		Namespace:   "default",
+		StorageSize: "1Gi",
+		Logger:      zap.NewNop(),
+	})
+
+	_, err := server.StartWorkload(context.Background(), &runnerv1.StartWorkloadRequest{
+		Main: &runnerv1.ContainerSpec{Name: "main", Image: "busybox"},
+		Volumes: []*runnerv1.VolumeSpec{
+			{
+				Name:           "data",
+				Kind:           runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+				PersistentName: "pvc-data",
+				StorageClass:   "missing",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error for unknown storage class")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument error, got %v", err)
+	}
+	if !strings.Contains(st.Message(), "unknown_storage_class") {
+		t.Fatalf("expected unknown storage class error, got %q", st.Message())
+	}
+}
+
+func TestStartWorkloadRejectsInvalidVolumeSize(t *testing.T) {
+	clientset := fake.NewSimpleClientset()
+	server := New(Options{
+		Clientset:   clientset,
+		Namespace:   "default",
+		StorageSize: "1Gi",
+		Logger:      zap.NewNop(),
+	})
+
+	_, err := server.StartWorkload(context.Background(), &runnerv1.StartWorkloadRequest{
+		Main: &runnerv1.ContainerSpec{Name: "main", Image: "busybox"},
+		Volumes: []*runnerv1.VolumeSpec{
+			{
+				Name:           "data",
+				Kind:           runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+				PersistentName: "pvc-data",
+				Size:           "lots",
+			},
+		},
+	})
+	if err == nil {
+		t.Fatalf("expected error for invalid volume size")
+	}
+	st, ok := status.FromError(err)
+	if !ok || st.Code() != codes.InvalidArgument {
+		t.Fatalf("expected invalid argument error, got %v", err)
+	}
+	if !strings.Contains(st.Message(), "invalid_volume_size") {
+		t.Fatalf("expected invalid volume size error, got %q", st.Message())
+	}
+}
+
 func TestStartWorkloadRejectsReservedVolumeLabel(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	server := New(Options{

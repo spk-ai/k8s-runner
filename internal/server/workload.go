@@ -660,6 +660,26 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "invalid_storage_size: %v", err)
 	}
+	if size := strings.TrimSpace(volume.GetSize()); size != "" {
+		requestSize, err = resource.ParseQuantity(size)
+		if err != nil {
+			return "", status.Errorf(codes.InvalidArgument, "invalid_volume_size: %v", err)
+		}
+	}
+
+	storageClass := s.storageClass
+	if name := strings.TrimSpace(volume.GetStorageClass()); name != "" {
+		resolved, ok := s.catalog.StorageClassNameFor(name)
+		if !ok {
+			return "", status.Errorf(codes.InvalidArgument, "unknown_storage_class: %s", name)
+		}
+		// An entry mapping to "" means the cluster default: nil, not a pointer
+		// to "", which would disable dynamic provisioning.
+		storageClass = nil
+		if resolved != "" {
+			storageClass = &resolved
+		}
+	}
 
 	pvc := &corev1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
@@ -676,8 +696,8 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 			},
 		},
 	}
-	if s.storageClass != nil {
-		pvc.Spec.StorageClassName = s.storageClass
+	if storageClass != nil {
+		pvc.Spec.StorageClassName = storageClass
 	}
 	for key, value := range labels {
 		if key == workloadIDLabelKey {

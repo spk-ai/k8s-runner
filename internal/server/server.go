@@ -34,6 +34,7 @@ type Server struct {
 	namespace                 string
 	storageClass              *string
 	storageSize               string
+	catalog                   config.Catalog
 	logger                    *zap.Logger
 	capabilityImplementations config.CapabilityImplementations
 
@@ -48,6 +49,7 @@ type Options struct {
 	Namespace                 string
 	StorageClass              *string
 	StorageSize               string
+	Catalog                   config.Catalog
 	Logger                    *zap.Logger
 	CapabilityImplementations config.CapabilityImplementations
 }
@@ -60,6 +62,7 @@ func New(options Options) *Server {
 		namespace:                 options.Namespace,
 		storageClass:              options.StorageClass,
 		storageSize:               options.StorageSize,
+		catalog:                   options.Catalog,
 		logger:                    options.Logger,
 		capabilityImplementations: options.CapabilityImplementations,
 		execSessions:              make(map[string]*execSession),

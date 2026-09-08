@@ -77,6 +77,7 @@ func run() error {
 			Namespace:                 cfg.Namespace,
 			StorageClass:              cfg.StorageClass,
 			StorageSize:               cfg.StorageSize,
+			Catalog:                   cfg.Catalog,
 			Logger:                    logger,
 			CapabilityImplementations: cfg.CapabilityImplementations,
 		}),
