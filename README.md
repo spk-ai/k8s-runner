@@ -125,3 +125,36 @@ fields as `zitiUnderlay.endpoints`, but new bootstrap config should use
 
 The runner runtime does not create or update NetworkPolicy resources, and its
 ServiceAccount does not need `networkpolicies` RBAC.
+
+## Workload ingress isolation
+
+Egress restrictions alone do not prevent other pods from opening connections to
+a workload. For installations whose workload access uses outbound OpenZiti
+connections, opt in to a separate default-deny ingress policy:
+
+```yaml
+workloadNamespace: agyn-workloads
+workloadIngressNetworkPolicy:
+  enabled: true
+```
+
+This policy selects `agyn.dev/managed-by=agents-orchestrator` by default. It does
+not select the runner service, add runtime RBAC, or change egress. It is disabled
+by default to preserve installations with direct workload ingress. Operators can
+set `name` and a nonempty `podSelectorLabels` map; an empty rendered selector is
+rejected to avoid accidentally isolating the entire namespace. Helm merges
+selector maps with defaults; set a default key to `null` to remove that key.
+
+Verify live direct Pod-IP and Service-IP connections from another pod are denied,
+with working listeners and positive controls, and verify overlay enrollment,
+terminal access and agent execution still work. Rendering the chart alone does
+not prove the CNI enforces it. NetworkPolicies are additive: another ingress
+policy can allow traffic denied by this policy's empty rule set. Review all
+policies selecting the workloads, including namespace-wide ones.
+
+This is a pod-network boundary, not a sandbox or per-session authorization
+mechanism. It does not isolate containers sharing a pod, prevent incoming node
+traffic, constrain traffic inside OpenZiti, or restrict the public destinations
+allowed by the egress policy. Nonprivileged runtime configuration, overlay
+authorization and credential isolation remain separate requirements. See the
+[Kubernetes NetworkPolicy semantics](https://kubernetes.io/docs/concepts/services-networking/network-policies/).
