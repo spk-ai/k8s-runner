@@ -35,6 +35,73 @@ E2E coverage runs from the centralized suite in
 [`agynio/e2e`](https://github.com/agynio/e2e) using the `k8s_runner` service tag.
 See [E2E Testing](https://github.com/agynio/architecture/blob/main/architecture/operations/e2e-testing.md).
 
+## Compute resource capability
+
+`compute-resources` is an opt-in RunnerService capability. It requires the
+`ContainerSpec.resources` API addition in `agynio/api` and an orchestrator that
+transmits the selected environment flavor's bounds. Upgrade the API, runner,
+then orchestrator before opting an agent profile in. Older runners must reject
+the unknown required capability, rather than silently ignore new protobuf fields.
+
+Set `SUPPORTING_CONTAINER_RESOURCES` to an explicit operator-owned JSON object:
+
+```json
+{"requestsCpu":"50m","requestsMemory":"64Mi","limitsCpu":"500m","limitsMemory":"256Mi"}
+```
+
+These are example bounds, not built-in defaults or production sizing advice.
+Invalid configuration fails startup. The runner advertises `compute-resources`
+only when valid supporting bounds are configured. An empty/unset variable
+disables it, even if the catalog lists the capability.
+
+Requests requiring this capability must include all four main-container fields.
+Supporting containers can omit the entire resource message to use the configured
+bounds, but explicit empty/partial messages are rejected. This includes normal
+sidecars, init containers, restartable init containers and Docker containers
+injected by the runner. Every quantity must be positive, representable, use
+whole millicores/bytes, and have its request no greater than its limit. Validation
+occurs before Kubernetes access, including PVC or secret creation. Resource
+fields without the required capability are rejected. Legacy requests with
+neither the capability nor fields retain their previous behavior.
+
+Bounds are **per container**, not one shared task budget. Supporting-container
+allocations are additional to the main flavor. This does not limit the number
+of tasks/containers, ephemeral storage, PIDs or network traffic. It does not
+harden privileged Docker or change security profiles. Deployment admission,
+aggregate quotas and adversarial sandboxing remain separate concerns.
+
+### Local API generation and enforcement test
+
+Until the API addition is published to BSR, generate against sibling source
+checkouts instead of the default published input:
+
+```bash
+cd ../api
+buf generate . --template ../k8s-runner/buf.gen.yaml \
+  --path proto/agynio/api/runner/v1 --path proto/agynio/api/runners/v1 \
+  --path proto/agynio/api/gateway/v1 --include-imports --output ../k8s-runner
+cd ../k8s-runner
+go test ./...
+```
+
+The opt-in Linux/cgroup-v2 test uses an explicitly selected trusted test cluster,
+a digest-pinned Node.js image and its own temporary namespace. It calls the real
+runner over loopback gRPC, checks cgroups before stress, then checks CPU
+throttling, a bounded OOM kill, supporting-container cgroups and a healthy
+neighbor. It uses no PVCs, model credentials or external Pod networking. Cleanup
+verifies Pod and namespace removal and refuses foreign Pod/PVC ownership.
+Ordinary tests skip it. Only run against a disposable local lab:
+
+```bash
+RUNNER_LIVE_RESOURCE_TEST=trusted-local \
+RUNNER_LIVE_KUBECONFIG=/absolute/path/to/lab-kubeconfig \
+RUNNER_LIVE_NODE_IMAGE=node:22-bookworm-slim@sha256:<verified-digest> \
+go test -v ./internal/server -run '^TestLiveComputeResources$' -count=1 -timeout=6m
+```
+
+This test does not establish end-to-end agent continuation or production
+security. See Kubernetes' [CPU and memory enforcement](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits).
+
 ## Docker capability notes
 
 The `docker` capability injects a Docker sidecar. For the **rootless**

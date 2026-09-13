@@ -80,6 +80,7 @@ write_subid "/subid/subgid" "$gid_length"
 type capabilityPlan struct {
 	dockerImplementation config.DockerImplementation
 	runtimeClassName     *string
+	computeResources     bool
 }
 
 func resolveCapabilityPlan(req *runnerv1.StartWorkloadRequest, implementations config.CapabilityImplementations) (capabilityPlan, error) {
@@ -97,6 +98,8 @@ func resolveCapabilityPlan(req *runnerv1.StartWorkloadRequest, implementations c
 
 	for _, capability := range capabilities {
 		switch capability {
+		case config.CapabilityComputeResources:
+			plan.computeResources = true
 		case dockerCapability:
 			implementation := implementations.Docker
 			if implementation == "" {
