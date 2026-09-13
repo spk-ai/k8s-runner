@@ -72,14 +72,15 @@ func run() error {
 	runnerv1.RegisterRunnerServiceServer(
 		grpcServer,
 		server.New(server.Options{
-			Clientset:                 kubeClient.Clientset,
-			RestConfig:                kubeClient.RestConfig,
-			Namespace:                 cfg.Namespace,
-			StorageClass:              cfg.StorageClass,
-			StorageSize:               cfg.StorageSize,
-			Catalog:                   cfg.Catalog,
-			Logger:                    logger,
-			CapabilityImplementations: cfg.CapabilityImplementations,
+			Clientset:                    kubeClient.Clientset,
+			RestConfig:                   kubeClient.RestConfig,
+			Namespace:                    cfg.Namespace,
+			StorageClass:                 cfg.StorageClass,
+			StorageSize:                  cfg.StorageSize,
+			Catalog:                      cfg.Catalog,
+			Logger:                       logger,
+			CapabilityImplementations:    cfg.CapabilityImplementations,
+			SupportingContainerResources: cfg.SupportingContainerResources,
 		}),
 	)
 
@@ -315,12 +316,21 @@ func catalogReport(cfg config.Config) *runnersv1.ReportRunnerCatalogRequest {
 //
 // The catalog entry is still honoured, so a capability can be advertised ahead
 // of the implementation landing, but it no longer has to be kept in step by
-// hand for the ones the runner already implements.
+// hand for the ones the runner already implements. compute-resources is an
+// exception: advertising enforcement requires validated supporting bounds.
 func catalogCapabilities(cfg config.Config) []string {
-	capabilities := make([]string, 0, len(cfg.Catalog.Capabilities)+1)
+	capabilities := make([]string, 0, len(cfg.Catalog.Capabilities)+2)
 	seen := map[string]struct{}{}
+	computeConfigured := false
+	if cfg.SupportingContainerResources != nil {
+		_, err := cfg.SupportingContainerResources.ResourceRequirements()
+		computeConfigured = err == nil
+	}
 	add := func(capability string) {
 		if capability == "" {
+			return
+		}
+		if capability == config.CapabilityComputeResources && !computeConfigured {
 			return
 		}
 		if _, ok := seen[capability]; ok {
@@ -334,6 +344,9 @@ func catalogCapabilities(cfg config.Config) []string {
 	}
 	if cfg.CapabilityImplementations.Docker != "" {
 		add(config.CapabilityDocker)
+	}
+	if computeConfigured {
+		add(config.CapabilityComputeResources)
 	}
 	sort.Strings(capabilities)
 	return capabilities

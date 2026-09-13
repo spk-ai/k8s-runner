@@ -21,16 +21,17 @@ const (
 
 // Config captures runtime configuration derived from the environment.
 type Config struct {
-	GRPCAddr                  string
-	Namespace                 string
-	ZitiEnabled               bool
-	ServiceToken              string
-	GatewayAddress            string
-	ZitiEnrollmentTimeout     time.Duration
-	StorageClass              *string
-	StorageSize               string
-	LogLevel                  string
-	CapabilityImplementations CapabilityImplementations
+	GRPCAddr                     string
+	Namespace                    string
+	ZitiEnabled                  bool
+	ServiceToken                 string
+	GatewayAddress               string
+	ZitiEnrollmentTimeout        time.Duration
+	StorageClass                 *string
+	StorageSize                  string
+	LogLevel                     string
+	CapabilityImplementations    CapabilityImplementations
+	SupportingContainerResources *ComputeResources
 	// Catalog is what this runner reports it offers. Declared in the runner's
 	// own configuration, since every entry needs an implementation here.
 	Catalog Catalog
@@ -97,6 +98,12 @@ func Load() (Config, error) {
 		return Config{}, err
 	}
 	cfg.Catalog = catalog
+	if value := strings.TrimSpace(os.Getenv("SUPPORTING_CONTAINER_RESOURCES")); value != "" {
+		cfg.SupportingContainerResources, err = parseSupportingResources(value)
+		if err != nil {
+			return Config{}, err
+		}
+	}
 
 	storageClass := strings.TrimSpace(os.Getenv("PVC_STORAGE_CLASS"))
 	if storageClass != "" {

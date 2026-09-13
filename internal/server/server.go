@@ -29,14 +29,15 @@ const (
 // Server implements the RunnerService gRPC API against the Kubernetes API.
 type Server struct {
 	runnerv1.UnimplementedRunnerServiceServer
-	clientset                 kubernetes.Interface
-	restConfig                *rest.Config
-	namespace                 string
-	storageClass              *string
-	storageSize               string
-	catalog                   config.Catalog
-	logger                    *zap.Logger
-	capabilityImplementations config.CapabilityImplementations
+	clientset                    kubernetes.Interface
+	restConfig                   *rest.Config
+	namespace                    string
+	storageClass                 *string
+	storageSize                  string
+	catalog                      config.Catalog
+	logger                       *zap.Logger
+	capabilityImplementations    config.CapabilityImplementations
+	supportingContainerResources *config.ComputeResources
 
 	execSessions   map[string]*execSession
 	execSessionsMu sync.Mutex
@@ -44,28 +45,30 @@ type Server struct {
 
 // Options defines required inputs for constructing a Server.
 type Options struct {
-	Clientset                 kubernetes.Interface
-	RestConfig                *rest.Config
-	Namespace                 string
-	StorageClass              *string
-	StorageSize               string
-	Catalog                   config.Catalog
-	Logger                    *zap.Logger
-	CapabilityImplementations config.CapabilityImplementations
+	Clientset                    kubernetes.Interface
+	RestConfig                   *rest.Config
+	Namespace                    string
+	StorageClass                 *string
+	StorageSize                  string
+	Catalog                      config.Catalog
+	Logger                       *zap.Logger
+	CapabilityImplementations    config.CapabilityImplementations
+	SupportingContainerResources *config.ComputeResources
 }
 
 // New constructs a RunnerService server.
 func New(options Options) *Server {
 	return &Server{
-		clientset:                 options.Clientset,
-		restConfig:                options.RestConfig,
-		namespace:                 options.Namespace,
-		storageClass:              options.StorageClass,
-		storageSize:               options.StorageSize,
-		catalog:                   options.Catalog,
-		logger:                    options.Logger,
-		capabilityImplementations: options.CapabilityImplementations,
-		execSessions:              make(map[string]*execSession),
+		clientset:                    options.Clientset,
+		restConfig:                   options.RestConfig,
+		namespace:                    options.Namespace,
+		storageClass:                 options.StorageClass,
+		storageSize:                  options.StorageSize,
+		catalog:                      options.Catalog,
+		logger:                       options.Logger,
+		capabilityImplementations:    options.CapabilityImplementations,
+		supportingContainerResources: options.SupportingContainerResources,
+		execSessions:                 make(map[string]*execSession),
 	}
 }
 
