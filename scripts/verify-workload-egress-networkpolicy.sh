@@ -209,3 +209,76 @@ if ! grep -Fq 'workloadEgressNetworkPolicy.zitiUnderlay.endpoints[zitiRuntimeIng
   cat "$error_log" >&2
   exit 1
 fi
+
+helm template k8s-runner "$chart_dir" >"$rendered"
+assert_not_contains 'name: "agent-workload-ingress"'
+
+helm template k8s-runner "$chart_dir" \
+  --set workloadIngressNetworkPolicy.enabled=true \
+  --show-only templates/workload-ingress-networkpolicy.yaml >"$rendered"
+assert_contains 'kind: NetworkPolicy'
+assert_contains 'name: "agent-workload-ingress"'
+assert_contains 'namespace: "agyn-workloads"'
+assert_contains 'agyn.dev/managed-by: agents-orchestrator'
+assert_contains '    - Ingress'
+assert_contains '  ingress: []'
+assert_not_contains '    - Egress'
+assert_not_contains 'from:'
+
+helm template k8s-runner "$chart_dir" --namespace release-namespace \
+  --set workloadIngressNetworkPolicy.enabled=true \
+  --set workloadIngressNetworkPolicy.name=isolated-fixture \
+  --set workloadNamespace= \
+  --set-json 'workloadIngressNetworkPolicy.podSelectorLabels={"a2a-proof":"fixture"}' \
+  --show-only templates/workload-ingress-networkpolicy.yaml >"$rendered"
+assert_contains 'name: "isolated-fixture"'
+assert_contains 'namespace: "release-namespace"'
+assert_contains 'a2a-proof: fixture'
+assert_contains 'agyn.dev/managed-by: agents-orchestrator'
+
+helm template k8s-runner "$chart_dir" \
+  --set workloadIngressNetworkPolicy.enabled=true \
+  --set workloadNamespace=isolated-workloads \
+  --set-json 'workloadIngressNetworkPolicy.podSelectorLabels={"agyn.dev/managed-by":null,"a2a-proof":"fixture"}' \
+  --show-only templates/workload-ingress-networkpolicy.yaml >"$rendered"
+assert_contains 'namespace: "isolated-workloads"'
+assert_contains 'a2a-proof: fixture'
+assert_not_contains 'agyn.dev/managed-by:'
+
+# Helm merges an empty map with defaults; clear the default key to render one.
+for selector in '{"agyn.dev/managed-by":null}' 'null'; do
+  if helm template k8s-runner "$chart_dir" \
+    --set workloadIngressNetworkPolicy.enabled=true \
+    --set-json "workloadIngressNetworkPolicy.podSelectorLabels=$selector" \
+    > /dev/null 2>"$error_log"; then
+    echo "expected empty ingress selector to be rejected" >&2
+    exit 1
+  fi
+  if ! grep -Fq 'workloadIngressNetworkPolicy.podSelectorLabels must not be empty' "$error_log"; then
+    cat "$error_log" >&2
+    exit 1
+  fi
+done
+
+if helm template k8s-runner "$chart_dir" \
+  --set workloadIngressNetworkPolicy.enabled=true \
+  --set workloadIngressNetworkPolicy.name= > /dev/null 2>"$error_log"; then
+  echo "expected missing ingress policy name to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq 'workloadIngressNetworkPolicy.name is required' "$error_log"; then
+  cat "$error_log" >&2
+  exit 1
+fi
+
+if helm template k8s-runner "$chart_dir" \
+  --set workloadIngressNetworkPolicy.enabled=true \
+  --set-json 'workloadIngressNetworkPolicy.podSelectorLabels={"a2a-proof":123}' \
+  > /dev/null 2>"$error_log"; then
+  echo "expected non-string selector values to be rejected" >&2
+  exit 1
+fi
+if ! grep -Fq 'workloadIngressNetworkPolicy.podSelectorLabels values must be strings' "$error_log"; then
+  cat "$error_log" >&2
+  exit 1
+fi

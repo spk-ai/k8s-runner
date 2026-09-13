@@ -221,6 +221,14 @@ metrics:
 
 workloadNamespace: agyn-workloads
 
+# Opt in only where workload access goes through outbound overlay connections.
+# Other NetworkPolicies can still add ingress allowances to these pods.
+workloadIngressNetworkPolicy:
+  enabled: false
+  name: agent-workload-ingress
+  podSelectorLabels:
+    agyn.dev/managed-by: agents-orchestrator
+
 workloadEgressNetworkPolicy:
   enabled: true
   name: agent-workload-egress
