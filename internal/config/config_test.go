@@ -155,6 +155,7 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("LOG_LEVEL", defaultLogLevel)
 	t.Setenv("GATEWAY_ADDRESS", defaultGatewayAddress)
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
+	t.Setenv("SUPPORTING_CONTAINER_RESOURCES", "")
 }
 
 func unsetEnv(t *testing.T, key string) {

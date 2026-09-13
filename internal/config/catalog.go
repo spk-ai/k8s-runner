@@ -31,10 +31,10 @@ type FlavorEntry struct {
 }
 
 type ComputeResources struct {
-	RequestsCPU    string `yaml:"requestsCpu"`
-	RequestsMemory string `yaml:"requestsMemory"`
-	LimitsCPU      string `yaml:"limitsCpu"`
-	LimitsMemory   string `yaml:"limitsMemory"`
+	RequestsCPU    string `yaml:"requestsCpu" json:"requestsCpu"`
+	RequestsMemory string `yaml:"requestsMemory" json:"requestsMemory"`
+	LimitsCPU      string `yaml:"limitsCpu" json:"limitsCpu"`
+	LimitsMemory   string `yaml:"limitsMemory" json:"limitsMemory"`
 }
 
 // IsZero reports whether nothing at all was declared.

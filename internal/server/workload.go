@@ -62,6 +62,10 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	if err != nil {
 		return nil, err
 	}
+	supportingResources, err := validateComputeResources(req, capabilityPlan.computeResources, s.supportingContainerResources)
+	if err != nil {
+		return nil, err
+	}
 
 	imagePullSecrets, secretNames, err := s.buildImagePullSecrets(ctx, workloadID, req.ImagePullCredentials)
 	if err != nil {
@@ -105,6 +109,9 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, err
 	}
 	hostUsers := capabilityPlan.apply(&containers, &initContainers, &volumes, &sidecarNames)
+	if capabilityPlan.computeResources {
+		applySupportingResources(containers, initContainers, supportingResources)
+	}
 
 	annotations := map[string]string{}
 	if len(pvcNames) > 0 {
@@ -795,6 +802,10 @@ func buildContainer(spec *runnerv1.ContainerSpec, fallbackName string, volumeLoo
 	if image == "" {
 		return corev1.Container{}, status.Error(codes.InvalidArgument, "container_image_required")
 	}
+	resources, err := containerResources(spec.GetResources())
+	if err != nil {
+		return corev1.Container{}, err
+	}
 
 	volumeMounts := make([]corev1.VolumeMount, 0, len(spec.Mounts)+len(spec.InlineFileMounts))
 	for _, mount := range spec.Mounts {
@@ -858,6 +869,7 @@ func buildContainer(spec *runnerv1.ContainerSpec, fallbackName string, volumeLoo
 		Env:          envVars,
 		WorkingDir:   strings.TrimSpace(spec.WorkingDir),
 		VolumeMounts: volumeMounts,
+		Resources:    resources,
 	}
 	if entrypoint := strings.TrimSpace(spec.Entrypoint); entrypoint != "" {
 		if strings.ContainsAny(entrypoint, " \t\n\r") {
