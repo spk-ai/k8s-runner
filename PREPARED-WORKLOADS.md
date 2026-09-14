@@ -1,8 +1,9 @@
 # Prepared Workloads
 
-Dependent native implementation on combined runner `2968787` and the matching
-`feat/prepared-workloads` API. This does not migrate the registry/orchestrator
-and is not a drop-in image for installed controllers.
+Dependent native implementation with read-only inspection added to prepared
+runner `4023808`. This branch requires the matching
+`feat/prepared-workload-inspection` API, based on registry API `4f957e5`.
+It is not a drop-in image for installed controllers.
 
 ## Native Contract
 
@@ -36,6 +37,24 @@ and is not a drop-in image for installed controllers.
   before using the new path for production isolation. Never fall back on
   Unimplemented; distinct RPCs prevent old servers ignoring new preconditions.
 
+## Read-Only Inspection
+
+`InspectPreparedWorkload` takes the stored complete workload binding. It checks
+the backend, Pod UID, original binding annotation, named claim set, claim UIDs
+and owner labels. Active Pods require their existing claim holds; inspection
+never repairs holds or removes a scheduling gate. An unactivated Pod must not
+be scheduled or have evidence of container execution. Two Pod reads must retain
+the same resource version. A concurrent change requires another read-only
+attempt, not activation as a probe or a name-only fallback.
+
+The response reports the validated Pod snapshot, native activation state,
+deletion-pending flag and resource version. Activation is not container readiness.
+This is not an atomic multi-resource snapshot, authenticated receipt, recovery
+of an unknown prepare intent, or node/storage fencing.
+
+Inspection adds no RBAC mutation rights. The focused tests assert GET-only
+Kubernetes actions for successful, conflicting and failed inspections.
+
 ## Permissions And Limits
 
 The chart adds PVC/Secret `patch` within its existing namespaced rules. No
@@ -55,6 +74,12 @@ separate enforcement. A late preparation can leave a gated orphan; a late hold
 write can require another bound cleanup attempt. Both need reconciliation.
 
 ## Verification
+
+The inspection follow-up passes all **493 ordinary native race-test entries**,
+build and vet. The three live scenarios plus their parent pass again, now with
+inspection before and after activation, after removal, and against a same-name
+replacement. The bounded fixture uses no models or installed platform services.
+The registry and controller are not part of this native fixture.
 
 On 2026-09-14, build/vet and all 468 ordinary race-test entries pass. The
 prepared tests pass another 1,060 entries across 20 repetitions. The three live
@@ -78,11 +103,11 @@ confirmed. It uses no A2A controller, registry, model credentials or actual Ziti
 transport, and does not claim those acceptance scopes.
 
 Generate the required local API before building this dependent runner. Run this
-in the matching `api-prepared-workloads` checkout, with adjacent checkouts:
+in the matching `api-prepared-inspection` checkout, with adjacent checkouts:
 
 ```bash
-buf generate . --template ../runner-prepared-workloads/buf.gen.yaml \
-  --output ../runner-prepared-workloads --include-imports \
+buf generate . --template ../runner-prepared-inspection/buf.gen.yaml \
+  --output ../runner-prepared-inspection --include-imports \
   --path proto/agynio/api/runner/v1 \
   --path proto/agynio/api/runners/v1 --path proto/agynio/api/gateway/v1
 ```

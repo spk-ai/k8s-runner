@@ -290,6 +290,10 @@ func (s *Server) InspectWorkload(ctx context.Context, req *runnerv1.InspectWorkl
 	if err != nil {
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
+	return inspectWorkloadPod(workloadID, pod)
+}
+
+func inspectWorkloadPod(workloadID string, pod *corev1.Pod) (*runnerv1.InspectWorkloadResponse, error) {
 	if len(pod.Spec.Containers) == 0 {
 		return nil, status.Error(codes.Internal, "pod_missing_containers")
 	}
