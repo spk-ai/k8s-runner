@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
@@ -42,6 +43,15 @@ func (s *blockedEnrollmentGateway) EnrollRunner(ctx context.Context, _ *runnersv
 func TestRunnerTransportProcessChild(t *testing.T) {
 	if os.Getenv("RUNNER_TRANSPORT_PROCESS_CHILD") != "1" {
 		t.Skip("child of the isolated startup transport test")
+	}
+	if os.Getenv("SERVICE_TOKEN") != "fixture-only" || os.Getenv("KUBE_NAMESPACE") != "fixture" || os.Getenv("ZITI_ENABLED") != "true" {
+		t.Fatal("startup child requires fixture-only configuration")
+	}
+	for _, name := range []string{"GRPC_ADDR", "GATEWAY_ADDRESS"} {
+		address, err := netip.ParseAddrPort(os.Getenv(name))
+		if err != nil || address.Addr() != netip.MustParseAddr("127.0.0.1") || address.Port() == 0 {
+			t.Fatal("startup child requires explicit loopback endpoints")
+		}
 	}
 	client := fake.NewSimpleClientset()
 	err := runWithKubeClient(func() (*kube.Client, error) { return &kube.Client{Clientset: client}, nil })
