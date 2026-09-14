@@ -914,7 +914,7 @@ func TestStartWorkloadMapsDnsConfig(t *testing.T) {
 }
 
 func TestStartWorkloadCreatesImagePullSecrets(t *testing.T) {
-	clientset := fake.NewSimpleClientset()
+	clientset := newIdentityClientset()
 	server := New(Options{
 		Clientset:   clientset,
 		Namespace:   "default",
@@ -1304,7 +1304,7 @@ func TestStartWorkloadRejectsIncompleteCredential(t *testing.T) {
 }
 
 func TestStopWorkloadDeletesPullSecrets(t *testing.T) {
-	clientset := fake.NewSimpleClientset()
+	clientset := newIdentityClientset()
 	server := New(Options{
 		Clientset:   clientset,
 		Namespace:   "default",
@@ -1338,7 +1338,7 @@ func TestStopWorkloadDeletesPullSecrets(t *testing.T) {
 }
 
 func TestRemoveWorkloadDeletesPullSecrets(t *testing.T) {
-	clientset := fake.NewSimpleClientset()
+	clientset := newIdentityClientset()
 	server := New(Options{
 		Clientset:   clientset,
 		Namespace:   "default",
@@ -1685,7 +1685,7 @@ func assertSidecarInstance(t *testing.T, sidecars []*runnerv1.SidecarInstance, n
 }
 
 func TestStartWorkloadMountsInlineFiles(t *testing.T) {
-	clientset := fake.NewSimpleClientset()
+	clientset := newIdentityClientset()
 	server := New(Options{
 		Clientset:   clientset,
 		Namespace:   "default",
@@ -1850,12 +1850,12 @@ func TestWorkloadPodDoesNotMountAServiceAccountToken(t *testing.T) {
 // One Secret per workload: every catalog image resolves to the same proxy host,
 // so one auths entry covers the whole Pod.
 func TestSingleCredentialProducesOneUnindexedSecret(t *testing.T) {
-	server := New(Options{Clientset: fake.NewSimpleClientset(), Namespace: "default", StorageSize: "1Gi", Logger: zap.NewNop()})
+	server := New(Options{Clientset: newIdentityClientset(), Namespace: "default", StorageSize: "1Gi", Logger: zap.NewNop()})
 
 	workloadID := "9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d"
 	refs, names, err := server.buildImagePullSecrets(context.Background(), workloadID, []*runnerv1.ImagePullCredential{
 		{Registry: "registry.agyn.dev", Username: "w-1", Password: "secret"},
-	})
+	}, newStartupSecrets(server, workloadID))
 	if err != nil {
 		t.Fatalf("buildImagePullSecrets: %v", err)
 	}

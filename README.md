@@ -102,6 +102,45 @@ go test -v ./internal/server -run '^TestLiveComputeResources$' -count=1 -timeout
 This test does not establish end-to-end agent continuation or production
 security. See Kubernetes' [CPU and memory enforcement](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/#requests-and-limits).
 
+## Failed Startup Secrets
+
+Pull and inline-file secrets carry a unique `agyn.io/startup-attempt` annotation.
+On a rejected startup, the runner cleans up that attempt's temporary secrets,
+including failures during PVC provisioning and partial secret creation. Durable
+PVCs are deliberately retained for their separate volume lifecycle.
+
+Cleanup uses a fresh, five-second context even if the RPC caller canceled. It
+checks Pod absence, secret ownership/content and recorded UIDs, deletes with UID
+and resource-version preconditions, and observes absence. A conflicting secret
+is never adopted. A lost secret-create acknowledgement can be reconciled only
+when the exact attempt's object is found. Conflicts, changed resources and held
+deletions remain unconfirmed; cleanup never removes finalizers or retries writes.
+
+A timeout, disconnect or server error during Pod creation may still mean a Pod
+was accepted. Its secrets are retained even if a subsequent read would say
+NotFound. The original gRPC failure code is preserved; unconfirmed cleanup adds
+`startup_secret_cleanup_unconfirmed` to the diagnostic and logs the workload and
+attempt IDs without dumping secret contents. This is not a retry authorization.
+
+The opt-in test exercises native PVC count/storage, Secret count and Pod count
+quota rejection through loopback RunnerService gRPC. It uses synthetic secrets,
+a new namespace, an absent unique StorageClass and a zero-Pod quota throughout.
+No image is pulled, no agent runs and no existing PVC is changed. It also verifies
+that an explicit second request reuses a partially created claim by UID/spec.
+Cleanup refuses unknown namespace/resource ownership. Use only a trusted local
+test cluster:
+
+```bash
+RUNNER_LIVE_STARTUP_TEST=trusted-local \
+RUNNER_LIVE_KUBECONFIG=/absolute/path/to/lab-kubeconfig \
+go test -race -v ./internal/server -run '^TestLiveStartupSecretCleanup$' -count=1 -timeout=5m
+```
+
+Process-crash orphan reconciliation, late-create fencing, named-PVC authorization
+and post-success Stop/Remove cleanup are separate lifecycle work. This change
+does not add a garbage collector, delete durable workspaces, change the Runner
+API, or establish end-to-end A2A recovery under first-provision rejection.
+
 ## Docker capability notes
 
 The `docker` capability injects a Docker sidecar. For the **rootless**
