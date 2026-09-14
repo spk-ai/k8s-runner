@@ -35,7 +35,7 @@ func checkedVolumePVC() *corev1.PersistentVolumeClaim {
 func checkedVolumeRequest(pvc *corev1.PersistentVolumeClaim) *runnerv1.RemoveVolumeCheckedRequest {
 	return &runnerv1.RemoveVolumeCheckedRequest{Expected: &runnerv1.VolumeListItem{
 		InstanceId: pvc.Name, InstanceUid: string(pvc.UID), VolumeKey: pvc.Labels[volumeKeyLabelKey],
-		IdentityLabels: maps.Clone(pvc.Labels),
+		IdentityLabels: maps.Clone(pvc.Labels), BackendId: testVolumeBackend,
 	}}
 }
 

@@ -92,6 +92,10 @@ func (s *Server) ListWorkloadsByVolume(ctx context.Context, req *runnerv1.ListWo
 }
 
 func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest) (*runnerv1.ListVolumesResponse, error) {
+	backend, err := s.volumeBackendID(ctx)
+	if err != nil {
+		return nil, err
+	}
 	selector := labels.Set(map[string]string{managedByLabelKey: managedByLabelValue}).AsSelector().String()
 	list, err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
 	if err != nil {
@@ -116,10 +120,14 @@ func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest
 			VolumeKey:      volumeKey,
 			InstanceUid:    string(pvc.UID),
 			IdentityLabels: volumeIdentityLabels(pvc.Labels),
+			BackendId:      backend,
 		})
 	}
 
-	return &runnerv1.ListVolumesResponse{Volumes: volumes}, nil
+	if _, err := s.checkVolumeBackend(ctx, backend); err != nil {
+		return nil, err
+	}
+	return &runnerv1.ListVolumesResponse{Volumes: volumes, BackendId: backend}, nil
 }
 
 func podUsesPVC(pod *corev1.Pod, pvcName string) bool {
