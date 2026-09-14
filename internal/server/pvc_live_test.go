@@ -419,6 +419,9 @@ func TestLivePVCOwnership(t *testing.T) {
 			}
 		})
 	}
+	t.Run("checked-removal", func(t *testing.T) {
+		testLiveCheckedVolumeRemoval(t, ctx, kube, runnerConfig, server, ownerLabel, run, ownedClaims)
+	})
 	t.Run("simultaneous-create", func(t *testing.T) {
 		const contenders = 8
 		ownedClaims["racing"] = ""
