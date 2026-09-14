@@ -61,6 +61,7 @@ func TestListWorkloadsReturnsLabeledPods(t *testing.T) {
 
 func TestListVolumesReturnsLabeledPVCs(t *testing.T) {
 	clientset := fake.NewSimpleClientset(
+		volumeTestNamespace(),
 		&corev1.PersistentVolumeClaim{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "pvc-1",

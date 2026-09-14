@@ -233,6 +233,8 @@ metrics:
         interval: ""
         scrapeTimeout: ""
 
+# Must match KUBE_NAMESPACE. The backend-identity ClusterRole grants only GET
+# on this namespace object; external RBAC must provide the same permission.
 workloadNamespace: agyn-workloads
 
 # Opt in only where workload access goes through outbound overlay connections.

@@ -32,6 +32,10 @@ func volumeIdentityLabels(labels map[string]string) map[string]string {
 }
 
 func validateVolumeRemovalTarget(expected *runnerv1.VolumeListItem) error {
+	backend := expected.GetBackendId()
+	if backend == "" || strings.TrimSpace(backend) != backend || len(backend) > 512 {
+		return status.Error(codes.InvalidArgument, "volume_backend_identity_required")
+	}
 	if expected == nil || expected.GetInstanceId() == "" || len(validation.IsDNS1123Subdomain(expected.GetInstanceId())) != 0 {
 		return status.Error(codes.InvalidArgument, "valid_volume_instance_id_required")
 	}
@@ -60,10 +64,19 @@ func (s *Server) RemoveVolumeChecked(ctx context.Context, req *runnerv1.RemoveVo
 	if err := validateVolumeRemovalTarget(expected); err != nil {
 		return nil, err
 	}
+	if _, err := s.checkVolumeBackend(ctx, expected.BackendId); err != nil {
+		return nil, err
+	}
 	claims := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace)
 	pvc, err := claims.Get(ctx, expected.InstanceId, metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
-		return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT}, nil
+		// Namespace deletion/recreation can race the namespaced lookup. A 404
+		// from another incarnation is not absence of the durable target.
+		backend, err := s.checkVolumeBackend(ctx, expected.BackendId)
+		if err != nil {
+			return nil, err
+		}
+		return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT, BackendId: backend}, nil
 	}
 	if err != nil {
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
@@ -83,5 +96,9 @@ func (s *Server) RemoveVolumeChecked(ctx context.Context, req *runnerv1.RemoveVo
 	}
 	// Even a successful DELETE can leave a mounted/finalized claim present.
 	// Only a subsequent GET returning NotFound confirms absence.
-	return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING}, nil
+	backend, err := s.checkVolumeBackend(ctx, expected.BackendId)
+	if err != nil {
+		return nil, err
+	}
+	return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING, BackendId: backend}, nil
 }
