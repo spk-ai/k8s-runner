@@ -37,7 +37,7 @@ type dockerAuth struct {
 	Auth     string `json:"auth"`
 }
 
-func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadRequest) (*runnerv1.StartWorkloadResponse, error) {
+func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadRequest) (_ *runnerv1.StartWorkloadResponse, returnedErr error) {
 	if req == nil || req.Main == nil {
 		return nil, status.Error(codes.InvalidArgument, "main_container_required")
 	}
@@ -63,7 +63,16 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, err
 	}
 
-	imagePullSecrets, secretNames, err := s.buildImagePullSecrets(ctx, workloadID, req.ImagePullCredentials)
+	startup := newStartupSecrets(s, workloadID)
+	defer func() {
+		if returnedErr != nil {
+			if err := startup.cleanup(ctx); err != nil {
+				s.logger.Error("startup secret cleanup unconfirmed", zap.String("workload_id", workloadID), zap.String("startup_attempt", startup.attempt), zap.Error(err))
+				returnedErr = status.Errorf(status.Code(returnedErr), "%s; startup_secret_cleanup_unconfirmed", status.Convert(returnedErr).Message())
+			}
+		}
+	}()
+	imagePullSecrets, secretNames, err := s.buildImagePullSecrets(ctx, workloadID, req.ImagePullCredentials, startup)
 	if err != nil {
 		return nil, err
 	}
@@ -75,12 +84,10 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 
 	inlineFiles, err := validateInlineFiles(req)
 	if err != nil {
-		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
 		return nil, err
 	}
-	inlineSecretName, inlineFileKeys, err := s.createInlineFilesSecret(ctx, workloadID, inlineFiles)
+	inlineSecretName, inlineFileKeys, err := s.createInlineFilesSecret(ctx, workloadID, inlineFiles, startup)
 	if err != nil {
-		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
 		return nil, err
 	}
 	if inlineSecretName != "" {
@@ -95,7 +102,6 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 
 	containers, initContainers, sidecarNames, err := buildContainers(req, volumes, inlineFileKeys)
 	if err != nil {
-		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
 		return nil, err
 	}
 	hostUsers := capabilityPlan.apply(&containers, &initContainers, &volumes, &sidecarNames)
@@ -151,7 +157,7 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	}
 
 	if _, err := s.clientset.CoreV1().Pods(s.namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
-		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
+		startup.podCreateUncertain = !createRejected(err)
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
 
@@ -488,6 +494,7 @@ func (s *Server) buildImagePullSecrets(
 	ctx context.Context,
 	workloadID string,
 	credentials []*runnerv1.ImagePullCredential,
+	startup *startupSecrets,
 ) ([]corev1.LocalObjectReference, []string, error) {
 	if len(credentials) == 0 {
 		return nil, nil, nil
@@ -537,7 +544,6 @@ func (s *Server) buildImagePullSecrets(
 		}
 		configJSON, err := buildDockerConfigJSON(credential.registry, credential.username, credential.password)
 		if err != nil {
-			s.deleteImagePullSecrets(ctx, workloadID, secretNames)
 			return nil, nil, status.Errorf(codes.Internal, "docker_config_json_failed: %v", err)
 		}
 
@@ -556,8 +562,7 @@ func (s *Server) buildImagePullSecrets(
 			},
 		}
 
-		if _, err := s.clientset.CoreV1().Secrets(s.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
-			s.deleteImagePullSecrets(ctx, workloadID, secretNames)
+		if _, err := startup.create(ctx, secret); err != nil {
 			return nil, nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 		}
 
@@ -1008,7 +1013,7 @@ func validateInlineFilePath(filePath string) error {
 	return nil
 }
 
-func (s *Server) createInlineFilesSecret(ctx context.Context, workloadID string, inlineFiles map[string][]byte) (string, map[string]string, error) {
+func (s *Server) createInlineFilesSecret(ctx context.Context, workloadID string, inlineFiles map[string][]byte, startup *startupSecrets) (string, map[string]string, error) {
 	if len(inlineFiles) == 0 {
 		return "", nil, nil
 	}
@@ -1040,7 +1045,7 @@ func (s *Server) createInlineFilesSecret(ctx context.Context, workloadID string,
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
 	}
-	if _, err := s.clientset.CoreV1().Secrets(s.namespace).Create(ctx, secret, metav1.CreateOptions{}); err != nil {
+	if _, err := startup.create(ctx, secret); err != nil {
 		return "", nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
 
