@@ -71,7 +71,8 @@ func startupRequest() *runnerv1.StartWorkloadRequest {
 			InlineFileMounts: []*runnerv1.InlineFileMount{{Path: "/config/test"}}},
 		ImagePullCredentials: []*runnerv1.ImagePullCredential{{Registry: "registry.invalid", Username: "fixture", Password: "not-a-credential"}},
 		InlineFiles:          map[string][]byte{"/config/test": []byte("fixture inline data")},
-		Volumes:              []*runnerv1.VolumeSpec{{Name: "workspace", PersistentName: "workspace", Kind: runnerv1.VolumeKind_VOLUME_KIND_NAMED}},
+		Volumes: []*runnerv1.VolumeSpec{{Name: "workspace", PersistentName: "workspace", Kind: runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+			Labels: map[string]string{volumeKeyLabelKey: "workspace-record"}}},
 	}
 }
 
@@ -99,7 +100,8 @@ func TestStartupSecretsPVCRejectionCleansCredentials(t *testing.T) {
 			claims := 0
 			if failure == "second-volume" {
 				claims = 1
-				req.Volumes = append(req.Volumes, &runnerv1.VolumeSpec{Name: "second", Kind: runnerv1.VolumeKind_VOLUME_KIND_NAMED})
+				req.Volumes = append(req.Volumes, &runnerv1.VolumeSpec{Name: "second", Kind: runnerv1.VolumeKind_VOLUME_KIND_NAMED,
+					Labels: map[string]string{volumeKeyLabelKey: "second-record"}})
 			}
 			if failure == "invalid-volume" {
 				req.Volumes[0].Name = "invalid/name"
@@ -116,6 +118,71 @@ func TestStartupSecretsPVCRejectionCleansCredentials(t *testing.T) {
 				t.Fatal("rejected startup succeeded")
 			}
 			startupObjects(t, client, 0, 0, claims)
+		})
+	}
+}
+
+// Combined acceptance: ownership validation must preserve durable claims while
+// startup rollback removes only credentials created by the rejected attempt.
+func TestStartupSecretsPVCIdentityIntegration(t *testing.T) {
+	for _, scenario := range []string{"matching-owner", "foreign-owner", "missing-key", "partial-create"} {
+		t.Run(scenario, func(t *testing.T) {
+			req, claim := pvcFixture(t)
+			credentials := startupRequest()
+			req.ImagePullCredentials = credentials.ImagePullCredentials
+			req.InlineFiles = credentials.InlineFiles
+			req.Main.InlineFileMounts = credentials.Main.InlineFileMounts
+			code, pods, secrets, claims := codes.FailedPrecondition, 0, 0, 1
+			switch scenario {
+			case "matching-owner":
+				code, pods, secrets = codes.OK, 1, 2
+			case "foreign-owner", "partial-create":
+				claim.Labels["agent-instance-id"] = "foreign-instance"
+			case "missing-key":
+				delete(req.Volumes[0].Labels, volumeKeyLabelKey)
+				code = codes.InvalidArgument
+			}
+			if scenario == "partial-create" {
+				req.Volumes = append([]*runnerv1.VolumeSpec{{Name: "first", PersistentName: "first", Size: "1Gi",
+					Kind: runnerv1.VolumeKind_VOLUME_KIND_NAMED, Labels: map[string]string{volumeKeyLabelKey: "first-record"}}}, req.Volumes...)
+				claims++
+			}
+			client := newIdentityClientset()
+			if err := client.Tracker().Add(claim.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			_, err := pvcTestServer(client).StartWorkload(context.Background(), req)
+			if status.Code(err) != code || err != nil && strings.Contains(err.Error(), "cleanup_unconfirmed") {
+				t.Fatalf("startup = %v, want %s with confirmed credential cleanup", err, code)
+			}
+			created, removed := 0, 0
+			for _, action := range client.Actions() {
+				if action.GetResource().Resource == "persistentvolumeclaims" &&
+					(action.GetVerb() == "delete" || action.GetVerb() == "update" || action.GetVerb() == "patch") {
+					t.Fatalf("startup mutated a durable claim: %s", action.GetVerb())
+				}
+				if action.Matches("create", "secrets") {
+					created++
+				}
+				if action.Matches("delete", "secrets") {
+					removed++
+					preconditions := action.(clienttesting.DeleteAction).GetDeleteOptions().Preconditions
+					if preconditions == nil || preconditions.UID == nil || preconditions.ResourceVersion == nil {
+						t.Fatal("credential deletion lacked identity preconditions")
+					}
+				}
+			}
+			if code != codes.OK && (created != 1 || removed != 1) {
+				t.Fatalf("rejection did not exercise pull-credential rollback: created=%d removed=%d", created, removed)
+			}
+			startupObjects(t, client, pods, secrets, claims)
+			assertPVCUnchanged(t, client, claim)
+			if scenario == "partial-create" {
+				first, err := client.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "first", metav1.GetOptions{})
+				if err != nil || first.Labels[volumeKeyLabelKey] != "first-record" || first.Labels["agent-instance-id"] != req.Labels["agent-instance-id"] {
+					t.Fatalf("partially created claim identity was not retained: %v", err)
+				}
+			}
 		})
 	}
 }
