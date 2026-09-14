@@ -43,7 +43,7 @@ rbac:
       verbs: ["get", "list", "create", "delete"]
     - apiGroups: [""]
       resources: ["secrets"]
-      verbs: ["create", "delete"]
+      verbs: ["get", "create", "delete"]
     - apiGroups: [""]
       resources: ["events"]
       verbs: ["get", "list", "watch"]

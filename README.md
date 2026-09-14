@@ -42,6 +42,11 @@ On a rejected startup, the runner cleans up that attempt's temporary secrets,
 including failures during PVC provisioning and partial secret creation. Durable
 PVCs are deliberately retained for their separate volume lifecycle.
 
+Deploy the chart's updated Secret rule before the new runner image: cleanup
+requires `get` in addition to `create` and `delete` in the workload namespace.
+No Secret `list` or `watch` permission is added. Operators overriding `rbac.rules`
+must update their rule explicitly; an image-only rollout is insufficient.
+
 Cleanup uses a fresh, five-second context even if the RPC caller canceled. It
 checks Pod absence, secret ownership/content and recorded UIDs, deletes with UID
 and resource-version preconditions, and observes absence. A conflicting secret
@@ -58,7 +63,12 @@ attempt IDs without dumping secret contents. This is not a retry authorization.
 The opt-in test exercises native PVC count/storage, Secret count and Pod count
 quota rejection through loopback RunnerService gRPC. It uses synthetic secrets,
 a new namespace, an absent unique StorageClass and a zero-Pod quota throughout.
-No image is pulled, no agent runs and no existing PVC is changed. It also verifies
+Runner calls impersonate a dedicated service account bound to the chart's rules
+in the fixture namespace, not the operator's administrator identity. Secret list
+access must remain forbidden. The operator kubeconfig must be able to create
+the fixture's ServiceAccount/Role/RoleBinding and impersonate that account.
+No image is pulled, no agent runs and no existing
+PVC is changed. It also verifies
 that an explicit second request reuses a partially created claim by UID/spec.
 Cleanup refuses unknown namespace/resource ownership. Use only a trusted local
 test cluster:
