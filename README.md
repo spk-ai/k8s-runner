@@ -15,12 +15,36 @@ incorrectly close a retained workspace's record. Unmanaged PVCs remain excluded.
 This changes the former skip-missing-key behavior. A damaged inventory requires
 operator ownership reconciliation before volume reconciliation can proceed;
 the runner does not adopt, relabel or delete claims to repair it. This is not
-deletion authorization, a UID precondition, or node/late-create fencing, and it
-does not change `RemoveVolume`. Valid orphan inventory still needs a controller
+deletion authorization or node/late-create fencing. Valid orphan inventory still needs a controller
 that does not infer deletion permission from a stale or scoped registry scan.
 
 After generating the APIs, run `go test -race ./...`. Focused tests are
 `go test -race ./internal/server -run '^TestListVolumes' -count=1`.
+
+## Checked Volume Removal
+
+This branch requires the proposed checked-volume API. `ListVolumes` additionally
+returns each PVC UID and only persistent identity labels; workload/turn labels
+and unrelated metadata are not included in that identity.
+
+`RemoveVolumeChecked` validates the durable expected name, key, UID and complete
+persistent ownership labels against a fresh GET, then uses that UID and the GET's
+resource version as Kubernetes delete preconditions. It refuses missing identity,
+foreign/replacement claims and claims with owner references. Conflicts are not
+retried against a different target. A terminating claim or DELETE acknowledgement
+returns `PENDING`; only GET/NotFound returns `ABSENT`. It never clears finalizers.
+
+Legacy `RemoveVolume` returns `FailedPrecondition`. So does
+`RemoveWorkload(remove_volumes=true)`, before touching a Pod, Secret or PVC.
+There is no compatibility escape flag. Ordinary workload removal retains disks.
+Deploy only after coordinating the API, durable registry intents and every
+orchestrator/sandbox cleanup caller. This branch is not a stock-image drop-in.
+
+Unit tests assert both delete preconditions, replacement/ownership conflicts,
+finalizer handling, backend failures and bypass rejection. The Kubernetes fake
+does not itself enforce preconditions; native acceptance is required separately.
+Caller authentication, durable intent storage, all-writer/late-create and
+node/storage fencing are not implemented by this runner change alone.
 
 ## Local Development
 

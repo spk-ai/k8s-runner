@@ -8,7 +8,6 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/remotecommand"
@@ -79,32 +78,13 @@ func (s *Server) PutArchive(ctx context.Context, req *runnerv1.PutArchiveRequest
 	return &runnerv1.PutArchiveResponse{}, nil
 }
 
-func (s *Server) RemoveVolume(ctx context.Context, req *runnerv1.RemoveVolumeRequest) (*runnerv1.RemoveVolumeResponse, error) {
+func (s *Server) RemoveVolume(_ context.Context, req *runnerv1.RemoveVolumeRequest) (*runnerv1.RemoveVolumeResponse, error) {
 	volumeName := strings.TrimSpace(req.GetVolumeName())
 	if volumeName == "" {
 		return nil, status.Error(codes.InvalidArgument, "volume_name_required")
 	}
 
-	// Removal is idempotent. The caller is a reconciler that retries until the
-	// volume is gone, so reporting an absent or already-terminating claim as an
-	// error leaves it retrying forever on work that is already done - which
-	// surfaced as a sandbox stuck in failed while its claim no longer existed.
-	pvc, err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).Get(ctx, volumeName, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) {
-		return &runnerv1.RemoveVolumeResponse{}, nil
-	}
-	if err != nil {
-		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
-	}
-	if pvc.DeletionTimestamp != nil {
-		return &runnerv1.RemoveVolumeResponse{}, nil
-	}
-
-	if err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).Delete(ctx, volumeName, metav1.DeleteOptions{}); err != nil && !apierrors.IsNotFound(err) {
-		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
-	}
-
-	return &runnerv1.RemoveVolumeResponse{}, nil
+	return nil, status.Error(codes.FailedPrecondition, "checked_volume_removal_required")
 }
 
 func mainContainerName(pod *corev1.Pod) (string, error) {

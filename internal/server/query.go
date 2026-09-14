@@ -112,8 +112,10 @@ func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest
 		}
 		keys[volumeKey] = struct{}{}
 		volumes = append(volumes, &runnerv1.VolumeListItem{
-			InstanceId: pvc.Name,
-			VolumeKey:  volumeKey,
+			InstanceId:     pvc.Name,
+			VolumeKey:      volumeKey,
+			InstanceUid:    string(pvc.UID),
+			IdentityLabels: volumeIdentityLabels(pvc.Labels),
 		})
 	}
 

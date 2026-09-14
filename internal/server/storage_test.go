@@ -7,7 +7,6 @@ import (
 	"go.uber.org/zap"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
-	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -27,47 +26,41 @@ func storageServer(t *testing.T, objects ...runtime.Object) (*Server, *fake.Clie
 	}), clientset
 }
 
-func TestRemoveVolumeDeletesTheClaim(t *testing.T) {
-	server, clientset := storageServer(t, &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{Name: "vol-1", Namespace: "default"},
-	})
+func TestRemoveVolumeCheckedDeletesTheClaim(t *testing.T) {
+	pvc := checkedVolumePVC()
+	server, clientset := storageServer(t, pvc)
 
-	if _, err := server.RemoveVolume(context.Background(), &runnerv1.RemoveVolumeRequest{VolumeName: "vol-1"}); err != nil {
-		t.Fatalf("RemoveVolume: %v", err)
+	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(pvc))
+	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
+		t.Fatalf("remove acknowledgement: %v, %v", resp, err)
 	}
-	_, err := clientset.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), "vol-1", metav1.GetOptions{})
+	_, err = clientset.CoreV1().PersistentVolumeClaims("default").Get(context.Background(), pvc.Name, metav1.GetOptions{})
 	if !apierrors.IsNotFound(err) {
 		t.Fatalf("claim still present: %v", err)
 	}
 }
 
-// The caller is a reconciler that retries until the volume is gone. Reporting an
-// absent claim as an error leaves it retrying forever on work already done — a
-// sandbox sat in failed for exactly this reason.
-func TestRemoveVolumeIsIdempotent(t *testing.T) {
+func TestRemoveVolumeCheckedIsIdempotent(t *testing.T) {
 	server, _ := storageServer(t)
 
-	if _, err := server.RemoveVolume(context.Background(), &runnerv1.RemoveVolumeRequest{VolumeName: "never-existed"}); err != nil {
-		t.Fatalf("RemoveVolume on an absent claim: %v", err)
+	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(checkedVolumePVC()))
+	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT {
+		t.Fatalf("confirmed absence: %v, %v", resp, err)
 	}
 }
 
-// A claim Kubernetes is already tearing down is on its way out; saying so as an
-// error restarts the same loop.
-func TestRemoveVolumeAcceptsATerminatingClaim(t *testing.T) {
+func TestRemoveVolumeCheckedKeepsATerminatingClaimPending(t *testing.T) {
 	deleting := metav1.Now()
-	server, _ := storageServer(t, &corev1.PersistentVolumeClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "vol-2",
-			Namespace:         "default",
-			DeletionTimestamp: &deleting,
-			Finalizers:        []string{"kubernetes.io/pvc-protection"},
-		},
-	})
+	pvc := checkedVolumePVC()
+	pvc.DeletionTimestamp = &deleting
+	pvc.Finalizers = []string{"kubernetes.io/pvc-protection"}
+	server, clientset := storageServer(t, pvc)
 
-	if _, err := server.RemoveVolume(context.Background(), &runnerv1.RemoveVolumeRequest{VolumeName: "vol-2"}); err != nil {
-		t.Fatalf("RemoveVolume on a terminating claim: %v", err)
+	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(pvc))
+	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
+		t.Fatalf("terminating claim: %v, %v", resp, err)
 	}
+	assertNoVolumeMutation(t, clientset)
 }
 
 func TestRemoveVolumeRequiresAName(t *testing.T) {
