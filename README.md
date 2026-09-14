@@ -198,6 +198,39 @@ The chart contribution is independent of A2A and agent runtimes. Live runner
 admission, including supporting-container accounting and release/reuse, needs
 separate acceptance with the resource-aware integration build.
 
+### Combined local quota acceptance
+
+This lab branch combines the separate chart and container-resource contributions;
+it is not a proposed bundled upstream change. `TestLiveWorkloadQuota` renders
+the real chart into its own temporary namespace and uses a real loopback gRPC
+RunnerService backed by Kubernetes. It requires a digest-pinned Node image whose
+default user is UID 1000. Every probe checks its UID and actual cgroup bounds.
+No provider credentials, agent calls, PVCs, host mounts or stress loops are used.
+The namespace has deny-all network policies; this is not a separate CNI proof.
+
+After local API generation and `helm dependency build charts/k8s-runner`, load
+the non-root probe image into the explicitly selected trusted local cluster:
+
+```sh
+env -u RUNNER_LIVE_RESOURCE_TEST GOMAXPROCS=4 \
+  RUNNER_LIVE_QUOTA_TEST=trusted-local \
+  RUNNER_LIVE_KUBECONFIG=/absolute/path/to/lab-kubeconfig \
+  RUNNER_LIVE_NODE_IMAGE=local-probe@sha256:<verified-loaded-digest> \
+  go test -v ./internal/server -run '^TestLiveWorkloadQuota$' -count=1 -timeout=6m
+```
+
+The test passed on local K3s `v1.33.1+k3s1` on 2026-09-14 in 35.82 seconds,
+using runner source `dc67264` and API `3c84a6a`. Each of the four CPU/memory
+quota keys independently rejected a start before Pod creation. Effective quota
+usage included normal sidecars, a restartable init and a larger regular init.
+A retained Succeeded Pod consumed `count/pods` but no compute quota. Six
+concurrent starts with one object slot admitted exactly one; five rejected Pods
+were independently confirmed absent. The existing neighbor kept progressing.
+After StopWorkload and observed Pod deletion, all quota usage returned to zero;
+ownership-checked cleanup confirmed namespace deletion. Ordinary full runner
+race tests pass with live tests disabled. This does not prove A2A recovery from
+quota rejection, node fencing, production sizing or hardened agent execution.
+
 ## Workload egress NetworkPolicy
 
 The Helm chart can install the static egress NetworkPolicy used by egress v1.
