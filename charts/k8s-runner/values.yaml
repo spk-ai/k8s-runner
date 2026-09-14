@@ -221,6 +221,15 @@ metrics:
 
 workloadNamespace: agyn-workloads
 
+# Namespace-wide admission, including supporting containers and non-agent Pods.
+# No implicit budget. Enable only after sizing the complete workload pool.
+workloadResourceQuota:
+  enabled: false
+  name: agent-workload-budget
+  # Required when enabled: requests.cpu, requests.memory, limits.cpu,
+  # limits.memory and count/pods. Native additional quota keys are supported.
+  hard: {}
+
 workloadEgressNetworkPolicy:
   enabled: true
   name: agent-workload-egress
