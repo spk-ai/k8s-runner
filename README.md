@@ -151,6 +151,63 @@ and post-success Stop/Remove cleanup are separate lifecycle work. This change
 does not add a garbage collector, delete durable workspaces, change the Runner
 API, or establish end-to-end A2A recovery under first-provision rejection.
 
+## Persistent claim reuse
+
+Every named `VolumeSpec` must supply a nonempty `labels.volume_key`, identifying
+its durable volume record. Current Agyn orchestrator requests already do this.
+Custom callers must set a stable, owner-specific key before upgrading; a key
+derived from a transient Pod/workload ID would break workspace continuation.
+Unkeyed named-volume requests are now rejected, even if that claim exists.
+
+An existing claim must retain the same key, runner/orchestrator management
+labels, and any agent-instance, agent-class, sandbox or sandbox-owner labels.
+Per-volume labels cannot override conflicting workload ownership labels.
+Per-start workload IDs and thread IDs do not participate in ownership matching.
+Missing or conflicting identity returns `FailedPrecondition` before Pod creation;
+the runner never adopts, relabels, renames or deletes the conflicting claim.
+Legacy claims missing identity require an audited operator reconciliation, not
+automatic backfilling or a new empty workspace.
+
+Validation applies to an ordinary lookup, a successful creation response and a
+fresh lookup after a competing create returns `AlreadyExists`. Uncertain API
+errors are returned, not treated as absence or permission to recreate storage.
+Deleting/lost claims and claims with garbage-collection owner references are
+rejected. Reuse requires a filesystem, compatible single-node/single-Pod access
+mode, sufficient requested capacity and a matching explicitly selected storage
+class. An unspecified class retains the cluster's original choice. Larger
+claims are preserved without resizing. Pending claims are permitted because
+binding may require the workload to be scheduled first.
+
+These checks do not authenticate RPC callers, fence old workloads or prevent a
+privileged writer from replacing a claim after validation. `ReadWriteOnce` is
+not a single-writer lock: Kubernetes permits same-node Pods to share it. See
+[Kubernetes access modes](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes).
+Admission controls, lifecycle fencing and secure RPC authorization remain
+separate requirements. Startup Secret rollback is a separate change; deployments
+using pull credentials should include that fix when enabling these rejections.
+
+The ordinary Go suite covers mismatched/missing ownership, unchanged reuse,
+validation before lookup, creation races and uncertain errors. The opt-in native
+test uses the chart's service-account permissions, a unique owned namespace,
+an absent storage class and a zero-Pod quota. No agent/image or existing
+workspace is used. Eight real API reads are held after `404` responses before
+competing creates verify that exactly one claim identity is retained:
+
+```sh
+RUNNER_LIVE_PVC_TEST=trusted-local \
+RUNNER_LIVE_KUBECONFIG=/absolute/path/to/test-kubeconfig \
+go test -race ./internal/server -run '^TestLivePVCOwnership$' -count=1 -timeout=4m -v
+```
+
+The operator needs namespace/RBAC creation and impersonation rights. Cleanup
+checks namespace/object UIDs and refuses to remove unexpected resources or
+claims that acquired backing storage. Test configuration must explicitly select
+the intended disposable local cluster; it never uses a default kubeconfig.
+Controller-injected Kubernetes/Istio CAs and trust-manager bundles are accepted
+only with certificate-only contents. Trust-manager bundles also require the
+matching controller UID, bundle label and content hash; reading that controller's
+metadata requires operator permission. Other injected objects prevent cleanup.
+
 ## Docker capability notes
 
 The `docker` capability injects a Docker sidecar. For the **rootless**
