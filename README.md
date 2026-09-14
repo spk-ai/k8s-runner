@@ -52,7 +52,7 @@ Role alone cannot grant access to the cluster-scoped namespace object. See
 All 186 independent race tests, including the Helm rendering check, pass; build
 and vet pass. Wrong/unavailable namespaces, inventory/absence races and runner
 restart are covered. A separate controller/registry acceptance uses real
-Kubernetes and PostgreSQL. This branch alone does not authenticate the runner
+Kubernetes and PostgreSQL. Those backend-identity checks alone do not authenticate the runner
 route, bind workload-start requests, fence delayed operations, protect cloned
 cluster identities or perform a rollout/adoption. It is not a drop-in upgrade.
 

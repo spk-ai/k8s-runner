@@ -38,7 +38,7 @@ and is not a drop-in image for installed controllers.
 
 ## Permissions And Limits
 
-The chart adds named PVC/Secret `patch` to its existing namespaced rules. No
+The chart adds PVC/Secret `patch` within its existing namespaced rules. No
 Secret list/watch, namespace list/write, wildcard grant or new cluster-wide
 mutation permission is added. The existing GET-only named-namespace grant is
 still required. External RBAC must supply these same permissions.
@@ -56,6 +56,14 @@ write can require another bound cleanup attempt. Both need reconciliation.
 
 ## Verification
 
+On 2026-09-14, build/vet and all 468 ordinary race-test entries pass. The
+prepared tests pass another 1,060 entries across 20 repetitions. The three live
+scenarios and parent pass on Kubernetes `v1.33.1+k3s1`, including asynchronous
+Secret GC. Four other opt-in Kubernetes fixtures were not enabled; the direct
+transport child helper is exercised through its parent. The initial live fixture
+omitted required supporting-resource configuration and was rejected before any
+workload creation; it was corrected without weakening runner validation.
+
 Unit/race tests cover invalid and missing identities, backend changes, missing
 resume PVCs (including loss between reads), concurrent-owner exclusion,
 UID/resource-version races, lost activation replies, retry across runner
@@ -68,6 +76,16 @@ It verifies real execution/resume, deletion protection and stale activation
 against Kubernetes. Fixture-only temporary resources are removed and absence is
 confirmed. It uses no A2A controller, registry, model credentials or actual Ziti
 transport, and does not claim those acceptance scopes.
+
+Generate the required local API before building this dependent runner. Run this
+in the matching `api-prepared-workloads` checkout, with adjacent checkouts:
+
+```bash
+buf generate . --template ../runner-prepared-workloads/buf.gen.yaml \
+  --output ../runner-prepared-workloads --include-imports \
+  --path proto/agynio/api/runner/v1 \
+  --path proto/agynio/api/runners/v1 --path proto/agynio/api/gateway/v1
+```
 
 ```bash
 RUNNER_LIVE_PREPARED_TEST=trusted-local \
