@@ -76,7 +76,7 @@ func TestListVolumesReturnsLabeledPVCs(t *testing.T) {
 				Name:      "pvc-2",
 				Namespace: "default",
 				Labels: map[string]string{
-					managedByLabelKey: managedByLabelValue,
+					managedByLabelKey: "another-controller",
 					"ignored":         "value",
 				},
 			},

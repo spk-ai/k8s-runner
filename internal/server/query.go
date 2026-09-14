@@ -99,11 +99,18 @@ func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest
 	}
 
 	volumes := make([]*runnerv1.VolumeListItem, 0, len(list.Items))
+	keys := make(map[string]struct{}, len(list.Items))
 	for _, pvc := range list.Items {
-		volumeKey, ok := pvc.Labels[volumeKeyLabelKey]
-		if !ok {
-			continue
+		volumeKey := pvc.Labels[volumeKeyLabelKey]
+		// Callers use absence to finalize volume records. A partial or
+		// ambiguous inventory is not evidence that a managed disk is gone.
+		if volumeKey == "" || strings.TrimSpace(volumeKey) != volumeKey {
+			return nil, status.Error(codes.FailedPrecondition, "volume_inventory_missing_key")
 		}
+		if _, exists := keys[volumeKey]; exists {
+			return nil, status.Error(codes.FailedPrecondition, "volume_inventory_duplicate_key")
+		}
+		keys[volumeKey] = struct{}{}
 		volumes = append(volumes, &runnerv1.VolumeListItem{
 			InstanceId: pvc.Name,
 			VolumeKey:  volumeKey,
