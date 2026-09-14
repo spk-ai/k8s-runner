@@ -21,6 +21,36 @@ that does not infer deletion permission from a stale or scoped registry scan.
 After generating the APIs, run `go test -race ./...`. Focused tests are
 `go test -race ./internal/server -run '^TestListVolumes' -count=1`.
 
+## Volume Backend Identity
+
+This dependent proposal requires the backend-identity API extension. Inventory
+and checked removal now identify the storage scope as
+`kubernetes-namespace/v1/<namespace-name>/<namespace-uid>`. The UID comes from
+the Kubernetes API, never configuration, a caller header or the expected target.
+[Kubernetes object IDs](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids)
+distinguish a namespace from another incarnation using the same name.
+
+The runner reads that identity before and after inventory/deletion observations.
+A missing, terminating, inaccessible or replaced namespace cannot establish PVC
+absence. Existing PVC UID/resource-version deletion preconditions remain in use.
+Ordinary namespace metadata updates and runner restarts preserve the identity.
+Both inventory envelopes and removal responses carry the observed identity;
+the controller/registry must pin and validate it, including empty inventory.
+
+When `rbac.create=true`, the chart adds a separate ClusterRole/Binding granting
+only `get` on the named `workloadNamespace` object. It grants no namespace list,
+write or other-namespace access. `workloadNamespace` must match `KUBE_NAMESPACE`;
+when managing RBAC externally, install the same scoped permission. A namespace
+Role alone cannot grant access to the cluster-scoped namespace object. See
+[Kubernetes named-resource RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources).
+
+All 185 independent race tests, including the Helm rendering check, pass; build
+and vet pass. Wrong/unavailable namespaces, inventory/absence races and runner
+restart are covered. A separate controller/registry acceptance uses real
+Kubernetes and PostgreSQL. This branch alone does not authenticate the runner
+route, bind workload-start requests, fence delayed operations, protect cloned
+cluster identities or perform a rollout/adoption. It is not a drop-in upgrade.
+
 ## Checked Volume Removal
 
 This branch requires the proposed checked-volume API. `ListVolumes` additionally

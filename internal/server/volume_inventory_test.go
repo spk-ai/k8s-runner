@@ -33,13 +33,13 @@ func TestListVolumesRejectsIncompleteInventory(t *testing.T) {
 				case "padded_key":
 					bad.Labels[volumeKeyLabelKey] = "volume-1 "
 				}
-				clientset := fake.NewSimpleClientset(good, bad)
+				clientset := fake.NewSimpleClientset(volumeTestNamespace(), good, bad)
 				server := New(Options{Clientset: clientset, Namespace: "default", Logger: zap.NewNop()})
 				resp, err := server.ListVolumes(context.Background(), &runnerv1.ListVolumesRequest{})
 				if status.Code(err) != codes.FailedPrecondition || resp != nil {
 					t.Fatalf("incomplete inventory must fail without a partial response: response %v, error %v", resp, err)
 				}
-				if actions := clientset.Actions(); len(actions) != 1 || actions[0].GetVerb() != "list" || actions[0].GetResource().Resource != "persistentvolumeclaims" {
+				if actions := clientset.Actions(); len(actions) != 2 || actions[0].GetVerb() != "get" || actions[0].GetResource().Resource != "namespaces" || actions[1].GetVerb() != "list" || actions[1].GetResource().Resource != "persistentvolumeclaims" {
 					t.Fatalf("inventory validation must not modify Kubernetes state: %v", actions)
 				}
 			})
@@ -49,7 +49,7 @@ func TestListVolumesRejectsIncompleteInventory(t *testing.T) {
 
 func TestListVolumesAcceptsCompleteInventory(t *testing.T) {
 	for _, count := range []int{0, 2} {
-		clientset := fake.NewSimpleClientset()
+		clientset := fake.NewSimpleClientset(volumeTestNamespace())
 		for _, name := range []string{"volume-1", "volume-2"}[:count] {
 			_, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{Name: name, Labels: map[string]string{managedByLabelKey: managedByLabelValue, volumeKeyLabelKey: name}}}, metav1.CreateOptions{})
 			if err != nil {

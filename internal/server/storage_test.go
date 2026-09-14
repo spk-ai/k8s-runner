@@ -17,7 +17,7 @@ import (
 
 func storageServer(t *testing.T, objects ...runtime.Object) (*Server, *fake.Clientset) {
 	t.Helper()
-	clientset := fake.NewSimpleClientset(objects...)
+	clientset := fake.NewSimpleClientset(append(objects, volumeTestNamespace())...)
 	return New(Options{
 		Clientset:   clientset,
 		Namespace:   "default",
