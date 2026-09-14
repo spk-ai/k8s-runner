@@ -20,12 +20,14 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
+	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
 
 	runnerv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runner/v1"
@@ -62,6 +64,7 @@ func TestLiveStartupSecretCleanup(t *testing.T) {
 	var nsUID, quotaUID types.UID
 	ownedClaims := map[string]types.UID{}
 	ownedWorkloads := map[string]bool{}
+	ownedRBAC := map[string]types.UID{}
 	namespaceAttempted := false
 	t.Cleanup(func() {
 		if !namespaceAttempted {
@@ -119,6 +122,31 @@ func TestLiveStartupSecretCleanup(t *testing.T) {
 				return
 			}
 		}
+		accounts, aErr := kube.CoreV1().ServiceAccounts(namespace).List(cleanup, metav1.ListOptions{})
+		roles, rErr := kube.RbacV1().Roles(namespace).List(cleanup, metav1.ListOptions{})
+		bindings, bErr := kube.RbacV1().RoleBindings(namespace).List(cleanup, metav1.ListOptions{})
+		if aErr != nil || rErr != nil || bErr != nil {
+			t.Error("RBAC cleanup inventory unconfirmed")
+			return
+		}
+		var objects []metav1.Object
+		for i := range accounts.Items {
+			if accounts.Items[i].Name != "default" {
+				objects = append(objects, &accounts.Items[i])
+			}
+		}
+		for i := range roles.Items {
+			objects = append(objects, &roles.Items[i])
+		}
+		for i := range bindings.Items {
+			objects = append(objects, &bindings.Items[i])
+		}
+		for _, object := range objects {
+			if object.GetLabels()[ownerLabel] != runID || ownedRBAC[object.GetName()] != object.GetUID() {
+				t.Error("foreign/replaced RBAC resource; retaining namespace")
+				return
+			}
+		}
 		if err := kube.CoreV1().Namespaces().Delete(cleanup, namespace, metav1.DeleteOptions{
 			Preconditions: &metav1.Preconditions{UID: &ns.UID, ResourceVersion: &ns.ResourceVersion},
 		}); err != nil && !apierrors.IsNotFound(err) {
@@ -149,6 +177,42 @@ func TestLiveStartupSecretCleanup(t *testing.T) {
 	}
 	nsUID = ns.UID
 	t.Logf("startup run=%s namespace=%s uid=%s", runID, namespace, nsUID)
+	account, err := kube.CoreV1().ServiceAccounts(namespace).Create(ctx, &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{Name: "startup-runner", Labels: map[string]string{ownerLabel: runID}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedRBAC[account.Name] = account.UID
+	role, err := kube.RbacV1().Roles(namespace).Create(ctx, &rbacv1.Role{
+		ObjectMeta: metav1.ObjectMeta{Name: "startup-runner-role", Labels: map[string]string{ownerLabel: runID}},
+		Rules:      startupChartRules(t),
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedRBAC[role.Name] = role.UID
+	binding, err := kube.RbacV1().RoleBindings(namespace).Create(ctx, &rbacv1.RoleBinding{
+		ObjectMeta: metav1.ObjectMeta{Name: "startup-runner-binding", Labels: map[string]string{ownerLabel: runID}},
+		RoleRef:    rbacv1.RoleRef{APIGroup: rbacv1.GroupName, Kind: "Role", Name: role.Name},
+		Subjects:   []rbacv1.Subject{{Kind: "ServiceAccount", Name: account.Name, Namespace: namespace}},
+	}, metav1.CreateOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownedRBAC[binding.Name] = binding.UID
+	runnerConfig := rest.CopyConfig(cfg)
+	runnerConfig.Impersonate = rest.ImpersonationConfig{UserName: "system:serviceaccount:" + namespace + ":" + account.Name,
+		Groups: []string{"system:serviceaccounts", "system:serviceaccounts:" + namespace, "system:authenticated"}}
+	runnerKube, err := kubernetes.NewForConfig(runnerConfig)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Use the actual chart permissions, never the operator's cluster-admin rights.
+	if _, err := runnerKube.CoreV1().Secrets(namespace).List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
+		t.Fatal("runner must not acquire Secret list permission")
+	}
+	t.Logf("runner authorization uses chart Role %s and service account %s; Secret list denied", role.Name, account.Name)
 	budget := func(secrets, claims, storageMi int) corev1.ResourceList {
 		return corev1.ResourceList{"count/pods": resource.MustParse("0"), "count/secrets": resource.MustParse(fmt.Sprint(secrets)),
 			"persistentvolumeclaims": resource.MustParse(fmt.Sprint(claims)), "requests.storage": resource.MustParse(fmt.Sprintf("%dMi", storageMi))}
@@ -208,7 +272,7 @@ func TestLiveStartupSecretCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	grpcServer := grpc.NewServer(grpc.WaitForHandlers(true))
-	runnerv1.RegisterRunnerServiceServer(grpcServer, New(Options{Clientset: kube, Namespace: namespace,
+	runnerv1.RegisterRunnerServiceServer(grpcServer, New(Options{Clientset: runnerKube, Namespace: namespace,
 		StorageSize: "1Mi", StorageClass: &storageClass, Logger: zap.NewNop()}))
 	served := make(chan error, 1)
 	go func() { served <- grpcServer.Serve(listener) }()
