@@ -1,0 +1,28 @@
+{{- if and .Values.rbac.create (not .Values.rbac.clusterWide) -}}
+{{- $namespace := required "workloadNamespace must be explicit for namespaced runner RBAC" .Values.workloadNamespace -}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ include "service-base.fullname" . }}
+  namespace: {{ $namespace | quote }}
+  labels:
+{{ include "service-base.labels" . | nindent 4 }}
+rules:
+{{ toYaml .Values.rbac.rules | nindent 2 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ include "service-base.fullname" . }}
+  namespace: {{ $namespace | quote }}
+  labels:
+{{ include "service-base.labels" . | nindent 4 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "service-base.serviceAccountName" . }}
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ include "service-base.fullname" . }}
+{{- end -}}
