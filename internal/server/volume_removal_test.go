@@ -32,8 +32,8 @@ func checkedVolumePVC() *corev1.PersistentVolumeClaim {
 	}}
 }
 
-func checkedVolumeRequest(pvc *corev1.PersistentVolumeClaim) *runnerv1.RemoveVolumeCheckedRequest {
-	return &runnerv1.RemoveVolumeCheckedRequest{Expected: &runnerv1.VolumeListItem{
+func checkedVolumeRequest(pvc *corev1.PersistentVolumeClaim) *runnerv1.RemoveVolumeBoundRequest {
+	return &runnerv1.RemoveVolumeBoundRequest{Expected: &runnerv1.VolumeListItem{
 		InstanceId: pvc.Name, InstanceUid: string(pvc.UID), VolumeKey: pvc.Labels[volumeKeyLabelKey],
 		IdentityLabels: maps.Clone(pvc.Labels), BackendId: testVolumeBackend,
 	}}
@@ -79,41 +79,41 @@ func TestRemoveWorkloadCannotBypassCheckedVolumeDeletion(t *testing.T) {
 	}
 }
 
-func TestRemoveVolumeCheckedRejectsIncompleteTarget(t *testing.T) {
-	tests := map[string]func(*runnerv1.RemoveVolumeCheckedRequest){
-		"missing target":  func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected = nil },
-		"missing name":    func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.InstanceId = "" },
-		"invalid name":    func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.InstanceId = "../other" },
-		"padded name":     func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.InstanceId += " " },
-		"missing uid":     func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.InstanceUid = "" },
-		"padded uid":      func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.InstanceUid += " " },
-		"missing key":     func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.VolumeKey = "" },
-		"invalid key":     func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.VolumeKey = "a/b" },
-		"missing labels":  func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels = nil },
-		"foreign manager": func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels[managedByLabelKey] = "foreign" },
-		"mismatched key":  func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels[volumeKeyLabelKey] = "other" },
-		"turn label":      func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels[workloadIDLabelKey] = "turn-1" },
-		"unknown label":   func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels["secret"] = "not-identity" },
-		"invalid label":   func(r *runnerv1.RemoveVolumeCheckedRequest) { r.Expected.IdentityLabels["agent-id"] = " " },
+func TestRemoveVolumeBoundRejectsIncompleteTarget(t *testing.T) {
+	tests := map[string]func(*runnerv1.RemoveVolumeBoundRequest){
+		"missing target":  func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected = nil },
+		"missing name":    func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.InstanceId = "" },
+		"invalid name":    func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.InstanceId = "../other" },
+		"padded name":     func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.InstanceId += " " },
+		"missing uid":     func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.InstanceUid = "" },
+		"padded uid":      func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.InstanceUid += " " },
+		"missing key":     func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.VolumeKey = "" },
+		"invalid key":     func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.VolumeKey = "a/b" },
+		"missing labels":  func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels = nil },
+		"foreign manager": func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels[managedByLabelKey] = "foreign" },
+		"mismatched key":  func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels[volumeKeyLabelKey] = "other" },
+		"turn label":      func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels[workloadIDLabelKey] = "turn-1" },
+		"unknown label":   func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels["secret"] = "not-identity" },
+		"invalid label":   func(r *runnerv1.RemoveVolumeBoundRequest) { r.Expected.IdentityLabels["agent-id"] = " " },
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
 			server, clientset := storageServer(t)
 			req := checkedVolumeRequest(checkedVolumePVC())
 			mutate(req)
-			resp, err := server.RemoveVolumeChecked(context.Background(), req)
+			resp, err := server.RemoveVolumeBound(context.Background(), req)
 			if resp != nil || status.Code(err) != codes.InvalidArgument || len(clientset.Actions()) != 0 {
 				t.Fatalf("invalid target reached backend: %v, %v, actions=%v", resp, err, clientset.Actions())
 			}
 		})
 	}
 	server, clientset := storageServer(t)
-	if resp, err := server.RemoveVolumeChecked(context.Background(), nil); resp != nil || status.Code(err) != codes.InvalidArgument || len(clientset.Actions()) != 0 {
+	if resp, err := server.RemoveVolumeBound(context.Background(), nil); resp != nil || status.Code(err) != codes.InvalidArgument || len(clientset.Actions()) != 0 {
 		t.Fatalf("nil request: %v, %v", resp, err)
 	}
 }
 
-func TestRemoveVolumeCheckedDoesNotRetarget(t *testing.T) {
+func TestRemoveVolumeBoundDoesNotRetarget(t *testing.T) {
 	tests := map[string]func(*corev1.PersistentVolumeClaim){
 		"replacement uid":    func(p *corev1.PersistentVolumeClaim) { p.UID = "replacement" },
 		"missing uid":        func(p *corev1.PersistentVolumeClaim) { p.UID = "" },
@@ -132,7 +132,7 @@ func TestRemoveVolumeCheckedDoesNotRetarget(t *testing.T) {
 			req := checkedVolumeRequest(pvc)
 			mutate(pvc)
 			server, clientset := storageServer(t, pvc)
-			resp, err := server.RemoveVolumeChecked(context.Background(), req)
+			resp, err := server.RemoveVolumeBound(context.Background(), req)
 			if resp != nil || status.Code(err) != codes.FailedPrecondition {
 				t.Fatalf("target mismatch was accepted: %v, %v", resp, err)
 			}
@@ -141,7 +141,7 @@ func TestRemoveVolumeCheckedDoesNotRetarget(t *testing.T) {
 	}
 }
 
-func TestRemoveVolumeCheckedUsesAtomicPreconditions(t *testing.T) {
+func TestRemoveVolumeBoundUsesAtomicPreconditions(t *testing.T) {
 	pvc := checkedVolumePVC()
 	req := checkedVolumeRequest(pvc)
 	pvc.Labels[workloadIDLabelKey] = "later-turn"
@@ -161,11 +161,11 @@ func TestRemoveVolumeCheckedUsesAtomicPreconditions(t *testing.T) {
 		}
 		return false, nil, nil
 	})
-	resp, err := server.RemoveVolumeChecked(context.Background(), req)
+	resp, err := server.RemoveVolumeBound(context.Background(), req)
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING || deletes != 1 {
 		t.Fatalf("delete: %v, %v, calls=%d", resp, err, deletes)
 	}
-	resp, err = server.RemoveVolumeChecked(context.Background(), req)
+	resp, err = server.RemoveVolumeBound(context.Background(), req)
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT || deletes != 1 {
 		t.Fatalf("absence confirmation: %v, %v", resp, err)
 	}
@@ -173,13 +173,13 @@ func TestRemoveVolumeCheckedUsesAtomicPreconditions(t *testing.T) {
 	if _, err := clientset.CoreV1().PersistentVolumeClaims("default").Create(context.Background(), pvc, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
-	resp, err = server.RemoveVolumeChecked(context.Background(), req)
+	resp, err = server.RemoveVolumeBound(context.Background(), req)
 	if resp != nil || status.Code(err) != codes.FailedPrecondition || deletes != 1 {
 		t.Fatalf("late retry deleted a replacement: %v, %v", resp, err)
 	}
 }
 
-func TestRemoveVolumeCheckedBackendFailuresNeverConfirmAbsence(t *testing.T) {
+func TestRemoveVolumeBoundBackendFailuresNeverConfirmAbsence(t *testing.T) {
 	resource := schema.GroupResource{Resource: "persistentvolumeclaims"}
 	for _, stage := range []string{"get", "delete"} {
 		for name, failure := range map[string]struct {
@@ -198,7 +198,7 @@ func TestRemoveVolumeCheckedBackendFailuresNeverConfirmAbsence(t *testing.T) {
 					calls++
 					return true, nil, failure.err
 				})
-				resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(pvc))
+				resp, err := server.RemoveVolumeBound(context.Background(), checkedVolumeRequest(pvc))
 				if resp != nil || status.Code(err) != failure.code || calls != 1 {
 					t.Fatalf("failure retried/confirmed: %v, %v, calls=%d", resp, err, calls)
 				}
@@ -209,7 +209,7 @@ func TestRemoveVolumeCheckedBackendFailuresNeverConfirmAbsence(t *testing.T) {
 	clientset.PrependReactor("delete", "persistentvolumeclaims", func(kubetesting.Action) (bool, runtime.Object, error) {
 		return true, nil, apierrors.NewNotFound(resource, "vol-1")
 	})
-	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(checkedVolumePVC()))
+	resp, err := server.RemoveVolumeBound(context.Background(), checkedVolumeRequest(checkedVolumePVC()))
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
 		t.Fatalf("delete-time NotFound is not an absence observation: %v, %v", resp, err)
 	}

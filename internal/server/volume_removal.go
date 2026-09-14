@@ -59,7 +59,11 @@ func validateVolumeRemovalTarget(expected *runnerv1.VolumeListItem) error {
 	return nil
 }
 
-func (s *Server) RemoveVolumeChecked(ctx context.Context, req *runnerv1.RemoveVolumeCheckedRequest) (*runnerv1.RemoveVolumeCheckedResponse, error) {
+func (s *Server) RemoveVolumeChecked(context.Context, *runnerv1.RemoveVolumeCheckedRequest) (*runnerv1.RemoveVolumeCheckedResponse, error) {
+	return nil, status.Error(codes.FailedPrecondition, "backend_bound_volume_removal_required")
+}
+
+func (s *Server) RemoveVolumeBound(ctx context.Context, req *runnerv1.RemoveVolumeBoundRequest) (*runnerv1.RemoveVolumeBoundResponse, error) {
 	expected := req.GetExpected()
 	if err := validateVolumeRemovalTarget(expected); err != nil {
 		return nil, err
@@ -76,7 +80,7 @@ func (s *Server) RemoveVolumeChecked(ctx context.Context, req *runnerv1.RemoveVo
 		if err != nil {
 			return nil, err
 		}
-		return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT, BackendId: backend}, nil
+		return &runnerv1.RemoveVolumeBoundResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT, BackendId: backend}, nil
 	}
 	if err != nil {
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
@@ -100,5 +104,5 @@ func (s *Server) RemoveVolumeChecked(ctx context.Context, req *runnerv1.RemoveVo
 	if err != nil {
 		return nil, err
 	}
-	return &runnerv1.RemoveVolumeCheckedResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING, BackendId: backend}, nil
+	return &runnerv1.RemoveVolumeBoundResponse{State: runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING, BackendId: backend}, nil
 }
