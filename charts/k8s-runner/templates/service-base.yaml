@@ -1,5 +1,8 @@
 {{- include "k8s-runner.configureCatalog" . -}}
-{{- $rbac := include "service-base.rbac" . -}}
+{{- $rbac := "" -}}
+{{- if .Values.rbac.clusterWide -}}
+  {{- $rbac = include "service-base.rbac" . -}}
+{{- end -}}
 {{- $sa := include "service-base.serviceAccount" . -}}
 {{- $svc := include "service-base.service" . -}}
 {{- $deploy := include "service-base.deployment" . -}}
