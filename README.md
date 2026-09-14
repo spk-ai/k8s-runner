@@ -46,6 +46,32 @@ does not itself enforce preconditions; native acceptance is required separately.
 Caller authentication, durable intent storage, all-writer/late-create and
 node/storage fencing are not implemented by this runner change alone.
 
+### Native checked-removal acceptance
+
+The local integration branch extends the existing isolated PVC ownership fixture:
+
+```sh
+RUNNER_LIVE_PVC_TEST=trusted-local \
+RUNNER_LIVE_KUBECONFIG=/absolute/path/to/local-kubeconfig \
+go test -race ./internal/server -run '^TestLivePVCOwnership$' -count=1 -timeout=5m
+```
+
+It creates a unique namespace, uses the chart's service-account permissions and
+forbids Pods. Its 1 MiB claims name an absent storage class, so no backing disks
+are provisioned. The removal subtest calls the real runner through loopback
+gRPC, exposing only inventory and checked/legacy deletion methods. It verifies
+pending finalization, confirmed absence and stale retries after name reuse.
+Controlled native mutations between GET and DELETE verify Kubernetes HTTP 409
+for both a replacement UID and an ownership change with the same UID.
+
+The fixture releases only its own synthetic finalizer on its own unbacked claim;
+it never strips Kubernetes protection or unrelated finalizers. Cleanup checks
+namespace/resource ownership and absence of backing storage before deleting the
+fixture namespace, then waits for absence. No platform deployment, existing
+workspace, agent or provider credential is involved. This is not a deployed
+orchestrator/registry/A2A deletion test. The fixture commit is an integration
+artifact, separate from the focused runner production patch and unit tests.
+
 ## Local Development
 
 Full setup: [Local Development](https://github.com/agynio/architecture/blob/main/architecture/operations/local-development.md)
