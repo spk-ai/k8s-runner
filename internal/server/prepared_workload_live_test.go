@@ -313,6 +313,9 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		}); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := admin.CoreV1().Pods(ns.Name).Get(ctx, podNameFromID(binding.WorkloadId), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("independent Pod absence not confirmed: %v", err)
+		}
 	}
 	waitSucceeded := func(t *testing.T, binding *runnerv1.WorkloadBinding) {
 		t.Helper()
