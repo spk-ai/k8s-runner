@@ -22,7 +22,6 @@ import (
 	"google.golang.org/grpc/status"
 
 	runnersgatewayv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/gateway/v1"
-	runnerv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runner/v1"
 	runnersv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runners/v1"
 	"github.com/agynio/k8s-runner/internal/config"
 	"github.com/agynio/k8s-runner/internal/kube"
@@ -49,6 +48,10 @@ func main() {
 }
 
 func run() error {
+	return runWithKubeClient(kube.New)
+}
+
+func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
@@ -63,14 +66,12 @@ func run() error {
 	}
 	defer func() { _ = logger.Sync() }()
 
-	kubeClient, err := kube.New()
+	kubeClient, err := newClient()
 	if err != nil {
 		return fmt.Errorf("init kube client: %w", err)
 	}
 
-	grpcServer := grpc.NewServer()
-	runnerv1.RegisterRunnerServiceServer(
-		grpcServer,
+	tcpServer, controlServer := newRunnerRPCServers(cfg.ZitiEnabled,
 		server.New(server.Options{
 			Clientset:                    kubeClient.Clientset,
 			RestConfig:                   kubeClient.RestConfig,
@@ -83,11 +84,15 @@ func run() error {
 			SupportingContainerResources: cfg.SupportingContainerResources,
 		}),
 	)
+	defer tcpServer.Stop()
+	if controlServer != tcpServer {
+		defer controlServer.Stop()
+	}
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
-	startServe := func(listener net.Listener, label string) {
+	startServe := func(grpcServer *grpc.Server, listener net.Listener, label string) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -107,7 +112,7 @@ func run() error {
 		return fmt.Errorf("listen on %s: %w", cfg.GRPCAddr, err)
 	}
 	defer listener.Close()
-	startServe(listener, "tcp")
+	startServe(tcpServer, listener, "tcp")
 
 	if cfg.ZitiEnabled {
 		gatewayConn, err := grpc.DialContext(ctx, cfg.GatewayAddress, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -180,7 +185,7 @@ func run() error {
 			return fmt.Errorf("listen on ziti service %s: %w", enrollResponse.ServiceName, err)
 		}
 		defer zitiListener.Close()
-		startServe(zitiListener, "ziti")
+		startServe(controlServer, zitiListener, "ziti")
 
 		wg.Add(1)
 		go func() {
@@ -212,7 +217,10 @@ func run() error {
 		}
 	case <-ctx.Done():
 		logger.Info("shutting down")
-		grpcServer.GracefulStop()
+		tcpServer.GracefulStop()
+		if controlServer != tcpServer {
+			controlServer.GracefulStop()
+		}
 	}
 
 	wg.Wait()
