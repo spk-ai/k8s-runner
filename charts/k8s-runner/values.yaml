@@ -27,6 +27,8 @@ automountServiceAccountToken: true
 
 rbac:
   create: true
+  # Namespaced grants target workloadNamespace; the service account stays in
+  # the release namespace. Cluster-wide workload access is an explicit opt-in.
   clusterWide: false
   rules:
     - apiGroups: [""]
