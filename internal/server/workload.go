@@ -219,6 +219,9 @@ func (s *Server) RemoveWorkload(ctx context.Context, req *runnerv1.RemoveWorkloa
 	if workloadID == "" {
 		return nil, status.Error(codes.InvalidArgument, "workload_id_required")
 	}
+	if req.GetRemoveVolumes() {
+		return nil, status.Error(codes.FailedPrecondition, "checked_volume_removal_required")
+	}
 
 	podName := podNameFromID(workloadID)
 
@@ -239,23 +242,6 @@ func (s *Server) RemoveWorkload(ctx context.Context, req *runnerv1.RemoveWorkloa
 	}
 
 	s.deleteImagePullSecrets(ctx, workloadID, secretNames)
-
-	if req.GetRemoveVolumes() {
-		pvcNames := parsePVCAnnotation(pod.Annotations)
-		var deleteErrs []error
-		for _, pvc := range pvcNames {
-			if err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).Delete(ctx, pvc, metav1.DeleteOptions{}); err != nil {
-				if apierrors.IsNotFound(err) {
-					continue
-				}
-				deleteErrs = append(deleteErrs, fmt.Errorf("delete pvc %s: %w", pvc, err))
-			}
-		}
-		if len(deleteErrs) > 0 {
-			s.logger.Error("failed to delete pvcs", zap.String("workload_id", workloadID), zap.Errors("errors", deleteErrs))
-			return nil, status.Error(codes.Internal, "pvc_cleanup_failed")
-		}
-	}
 
 	return &runnerv1.RemoveWorkloadResponse{}, nil
 }
