@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -58,6 +60,37 @@ func (s *startupSecrets) create(ctx context.Context, spec *corev1.Secret) (*core
 	}
 	entry.uid, entry.uncertain = created.UID, false
 	return created, nil
+}
+
+// Prepared Pods cannot run yet. Tie each temporary credential to its exact Pod
+// incarnation so normal Kubernetes garbage collection owns post-success cleanup.
+func (s *startupSecrets) attachPreparedOwner(ctx context.Context, pod *corev1.Pod) error {
+	owner := metav1.OwnerReference{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}
+	secrets := s.server.clientset.CoreV1().Secrets(s.server.namespace)
+	for _, entry := range s.entries {
+		current, err := secrets.Get(ctx, entry.spec.Name, metav1.GetOptions{})
+		if err != nil {
+			return grpcErrorFromKube(s.server.logger, err, codes.Internal)
+		}
+		if entry.uid == "" || current.UID != entry.uid || current.ResourceVersion == "" || current.DeletionTimestamp != nil ||
+			current.Annotations[startupAttemptAnnotation] != s.attempt || len(current.OwnerReferences) != 0 || !reflect.DeepEqual(current.Data, entry.spec.Data) || current.Type != entry.spec.Type {
+			return status.Error(codes.FailedPrecondition, "prepared_secret_identity_mismatch")
+		}
+		for key, value := range entry.spec.Labels {
+			if current.Labels[key] != value {
+				return status.Error(codes.FailedPrecondition, "prepared_secret_identity_mismatch")
+			}
+		}
+		patched, err := secrets.Patch(ctx, current.Name, types.JSONPatchType,
+			preparedObjectPatch(current.ObjectMeta, preparedPatchOperation{"add", "/metadata/ownerReferences", []metav1.OwnerReference{owner}}), metav1.PatchOptions{})
+		if err != nil {
+			return grpcErrorFromKube(s.server.logger, err, codes.Internal)
+		}
+		if patched.UID != entry.uid || !reflect.DeepEqual(patched.OwnerReferences, []metav1.OwnerReference{owner}) {
+			return status.Error(codes.FailedPrecondition, "prepared_secret_owner_unconfirmed")
+		}
+	}
+	return nil
 }
 
 // A read returning NotFound after a timeout is not evidence that an in-flight

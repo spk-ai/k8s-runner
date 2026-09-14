@@ -107,6 +107,15 @@ workspace, agent or provider credential is involved. This is not a deployed
 orchestrator/registry/A2A deletion test. The fixture commit is an integration
 artifact, separate from the focused runner production patch and unit tests.
 
+## Prepared Workloads
+
+The dependent [two-phase native lifecycle](PREPARED-WORKLOADS.md) prepares gated
+Pods, verifies immutable backend/workspace bindings before activation, and
+retains per-Pod claim protection until confirmed removal. It requires the new
+API, Kubernetes >=1.30 and additional namespaced PVC/Secret patch permissions.
+Control-plane persistence/caller migration, reconciliation, authenticated
+enforcement and coordinated A2A rollout remain pending. It is not a drop-in image.
+
 ## Control Transport
 
 With `ZITI_ENABLED=true`, the full RunnerService is served only on the OpenZiti

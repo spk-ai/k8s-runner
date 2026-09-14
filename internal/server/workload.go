@@ -37,7 +37,11 @@ type dockerAuth struct {
 	Auth     string `json:"auth"`
 }
 
-func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadRequest) (_ *runnerv1.StartWorkloadResponse, returnedErr error) {
+func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadRequest) (*runnerv1.StartWorkloadResponse, error) {
+	return s.startWorkload(ctx, req, nil)
+}
+
+func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadRequest, preparation *workloadPreparation) (_ *runnerv1.StartWorkloadResponse, returnedErr error) {
 	if req == nil || req.Main == nil {
 		return nil, status.Error(codes.InvalidArgument, "main_container_required")
 	}
@@ -81,7 +85,7 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, err
 	}
 
-	volumes, pvcNames, err := s.buildVolumes(ctx, req.Volumes, labels)
+	volumes, pvcNames, err := s.buildWorkloadVolumes(ctx, req.Volumes, labels, preparation)
 	if err != nil {
 		return nil, err
 	}
@@ -169,9 +173,25 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		}
 	}
 
-	if _, err := s.clientset.CoreV1().Pods(s.namespace).Create(ctx, pod, metav1.CreateOptions{}); err != nil {
+	createOptions := metav1.CreateOptions{}
+	if preparation != nil {
+		createOptions.FieldValidation = metav1.FieldValidationStrict
+		if err := preparation.gate(ctx, s, pod); err != nil {
+			return nil, err
+		}
+	}
+	createdPod, err := s.clientset.CoreV1().Pods(s.namespace).Create(ctx, pod, createOptions)
+	if err != nil {
 		startup.podCreateUncertain = !createRejected(err)
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if preparation != nil {
+		if err := preparation.accept(ctx, s, createdPod); err != nil {
+			return nil, err
+		}
+		if err := startup.attachPreparedOwner(ctx, createdPod); err != nil {
+			return nil, err
+		}
 	}
 
 	sidecars := make([]*runnerv1.SidecarInstance, 0, len(sidecarNames))
@@ -205,6 +225,9 @@ func (s *Server) StopWorkload(ctx context.Context, req *runnerv1.StopWorkloadReq
 	if err != nil {
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
+	if pod.Annotations[preparedBindingAnnotation] != "" {
+		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_binding_required")
+	}
 	secretNames := parseSecretAnnotation(pod.Annotations)
 
 	deleteOptions := metav1.DeleteOptions{}
@@ -234,6 +257,9 @@ func (s *Server) RemoveWorkload(ctx context.Context, req *runnerv1.RemoveWorkloa
 	pod, err := s.clientset.CoreV1().Pods(s.namespace).Get(ctx, podName, metav1.GetOptions{})
 	if err != nil {
 		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if pod.Annotations[preparedBindingAnnotation] != "" {
+		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_binding_required")
 	}
 	secretNames := parseSecretAnnotation(pod.Annotations)
 
@@ -593,6 +619,10 @@ func (s *Server) deleteImagePullSecrets(ctx context.Context, workloadID string, 
 }
 
 func (s *Server) buildVolumes(ctx context.Context, volumes []*runnerv1.VolumeSpec, labels map[string]string) ([]corev1.Volume, []string, error) {
+	return s.buildWorkloadVolumes(ctx, volumes, labels, nil)
+}
+
+func (s *Server) buildWorkloadVolumes(ctx context.Context, volumes []*runnerv1.VolumeSpec, labels map[string]string, preparation *workloadPreparation) ([]corev1.Volume, []string, error) {
 	volumeNames := make(map[string]struct{})
 	createdVolumes := make([]corev1.Volume, 0, len(volumes))
 	pvcNames := make([]string, 0)
@@ -621,7 +651,13 @@ func (s *Server) buildVolumes(ctx context.Context, volumes []*runnerv1.VolumeSpe
 				},
 			})
 		case runnerv1.VolumeKind_VOLUME_KIND_NAMED:
-			pvcName, err := s.ensurePVC(ctx, volume, labels)
+			var pvcName string
+			var err error
+			if preparation == nil {
+				pvcName, err = s.ensurePVC(ctx, volume, labels)
+			} else {
+				pvcName, err = preparation.resolvePVC(ctx, s, volume, labels)
+			}
 			if err != nil {
 				return nil, nil, err
 			}
@@ -642,32 +678,32 @@ func (s *Server) buildVolumes(ctx context.Context, volumes []*runnerv1.VolumeSpe
 	return createdVolumes, pvcNames, nil
 }
 
-func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, labels map[string]string) (string, error) {
+func (s *Server) desiredPVC(volume *runnerv1.VolumeSpec, labels map[string]string) (*corev1.PersistentVolumeClaim, error) {
 	pvcName := strings.TrimSpace(volume.PersistentName)
 	if pvcName == "" {
 		pvcName = strings.TrimSpace(volume.Name)
 	}
 	if pvcName == "" {
-		return "", status.Error(codes.InvalidArgument, "pvc_name_required")
+		return nil, status.Error(codes.InvalidArgument, "pvc_name_required")
 	}
 	if errs := validation.IsDNS1123Label(pvcName); len(errs) > 0 {
-		return "", status.Errorf(codes.InvalidArgument, "invalid_pvc_name: %s", strings.Join(errs, ", "))
+		return nil, status.Errorf(codes.InvalidArgument, "invalid_pvc_name: %s", strings.Join(errs, ", "))
 	}
 
 	requestSize, err := resource.ParseQuantity(s.storageSize)
 	if err != nil {
-		return "", status.Errorf(codes.Internal, "invalid_storage_size: %v", err)
+		return nil, status.Errorf(codes.Internal, "invalid_storage_size: %v", err)
 	}
 	if requestSize.Sign() <= 0 {
-		return "", status.Error(codes.Internal, "invalid_storage_size: must be positive")
+		return nil, status.Error(codes.Internal, "invalid_storage_size: must be positive")
 	}
 	if size := strings.TrimSpace(volume.GetSize()); size != "" {
 		requestSize, err = resource.ParseQuantity(size)
 		if err != nil {
-			return "", status.Errorf(codes.InvalidArgument, "invalid_volume_size: %v", err)
+			return nil, status.Errorf(codes.InvalidArgument, "invalid_volume_size: %v", err)
 		}
 		if requestSize.Sign() <= 0 {
-			return "", status.Error(codes.InvalidArgument, "invalid_volume_size: must be positive")
+			return nil, status.Error(codes.InvalidArgument, "invalid_volume_size: must be positive")
 		}
 	}
 
@@ -675,7 +711,7 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	if name := strings.TrimSpace(volume.GetStorageClass()); name != "" {
 		resolved, ok := s.catalog.StorageClassNameFor(name)
 		if !ok {
-			return "", status.Errorf(codes.InvalidArgument, "unknown_storage_class: %s", name)
+			return nil, status.Errorf(codes.InvalidArgument, "unknown_storage_class: %s", name)
 		}
 		// An entry mapping to "" means the cluster default: nil, not a pointer
 		// to "", which would disable dynamic provisioning.
@@ -710,20 +746,29 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 		pvc.Labels[key] = value
 	}
 	if err := addLabels(pvc.Labels, volume.GetLabels()); err != nil {
-		return "", status.Errorf(codes.InvalidArgument, "invalid_volume_label: %v", err)
+		return nil, status.Errorf(codes.InvalidArgument, "invalid_volume_label: %v", err)
 	}
 	if strings.TrimSpace(volume.GetLabels()[volumeKeyLabelKey]) == "" {
-		return "", status.Error(codes.InvalidArgument, "volume_key_required: named volumes must identify their persistent record")
+		return nil, status.Error(codes.InvalidArgument, "volume_key_required: named volumes must identify their persistent record")
 	}
 	for _, key := range pvcIdentityLabelKeys {
 		if value, present := pvc.Labels[key]; present && value == "" {
-			return "", status.Errorf(codes.InvalidArgument, "invalid_volume_owner_label: %s must not be empty", key)
+			return nil, status.Errorf(codes.InvalidArgument, "invalid_volume_owner_label: %s must not be empty", key)
 		}
 		if value, present := labels[key]; present && pvc.Labels[key] != value {
-			return "", status.Errorf(codes.InvalidArgument, "conflicting_volume_owner_label: %s", key)
+			return nil, status.Errorf(codes.InvalidArgument, "conflicting_volume_owner_label: %s", key)
 		}
 	}
 
+	return pvc, nil
+}
+
+func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, labels map[string]string) (string, error) {
+	pvc, err := s.desiredPVC(volume, labels)
+	if err != nil {
+		return "", err
+	}
+	pvcName := pvc.Name
 	claims := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace)
 	existing, err := claims.Get(ctx, pvcName, metav1.GetOptions{})
 	created := false
@@ -741,6 +786,11 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	}
 	if err := validatePVCReuse(existing, pvc); err != nil {
 		return "", err
+	}
+	for _, finalizer := range existing.Finalizers {
+		if strings.HasPrefix(finalizer, preparedHoldPrefix) {
+			return "", status.Error(codes.FailedPrecondition, "prepared_volume_binding_required")
+		}
 	}
 
 	if created {

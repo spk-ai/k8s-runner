@@ -39,9 +39,9 @@ func TestStartupSecretChartPermissions(t *testing.T) {
 		found++
 		verbs := slices.Clone(rule.Verbs)
 		slices.Sort(verbs)
-		if !reflect.DeepEqual(verbs, []string{"create", "delete", "get"}) ||
+		if !reflect.DeepEqual(verbs, []string{"create", "delete", "get", "patch"}) ||
 			!reflect.DeepEqual(rule.APIGroups, []string{""}) || !reflect.DeepEqual(rule.Resources, []string{"secrets"}) {
-			t.Fatalf("startup cleanup requires named Secret get/create/delete, without list/watch or wildcard grants: %+v", rule)
+			t.Fatalf("startup cleanup and prepared ownership require named Secret get/create/delete/patch, without list/watch or wildcard grants: %+v", rule)
 		}
 	}
 	if found != 1 {
