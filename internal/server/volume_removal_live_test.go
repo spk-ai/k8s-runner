@@ -41,7 +41,7 @@ func volumeRemovalRPC(t *testing.T, server *Server) runnerv1.RunnerServiceClient
 	}
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
-		case runnerv1.RunnerService_ListVolumes_FullMethodName, runnerv1.RunnerService_RemoveVolumeChecked_FullMethodName,
+		case runnerv1.RunnerService_ListVolumes_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName,
 			runnerv1.RunnerService_RemoveVolume_FullMethodName, runnerv1.RunnerService_RemoveWorkload_FullMethodName:
 			return handler(ctx, req)
 		default:
@@ -125,7 +125,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 		owned[name] = pvc.UID
 		return pvc
 	}
-	expected := func(t *testing.T, pvc *corev1.PersistentVolumeClaim) *runnerv1.RemoveVolumeCheckedRequest {
+	expected := func(t *testing.T, pvc *corev1.PersistentVolumeClaim) *runnerv1.RemoveVolumeBoundRequest {
 		t.Helper()
 		inventory, err := client.ListVolumes(ctx, &runnerv1.ListVolumesRequest{})
 		if err != nil {
@@ -133,7 +133,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 		}
 		for _, item := range inventory.Volumes {
 			if item.InstanceId == pvc.Name && item.InstanceUid == string(pvc.UID) {
-				return &runnerv1.RemoveVolumeCheckedRequest{Expected: item}
+				return &runnerv1.RemoveVolumeBoundRequest{Expected: item}
 			}
 		}
 		t.Fatal("native inventory did not return the created incarnation")
@@ -191,7 +191,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 		})
 		req := expected(t, pvc)
 		if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 10*time.Second, true, func(ctx context.Context) (bool, error) {
-			resp, err := client.RemoveVolumeChecked(ctx, req)
+			resp, err := client.RemoveVolumeBound(ctx, req)
 			if status.Code(err) == codes.Aborted {
 				return false, nil
 			}
@@ -209,7 +209,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 		if err != nil || held.DeletionTimestamp == nil || !slices.Contains(held.Finalizers, finalizer) {
 			t.Fatalf("finalizer did not hold deletion: %v", err)
 		}
-		resp, err := client.RemoveVolumeChecked(ctx, req)
+		resp, err := client.RemoveVolumeBound(ctx, req)
 		if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
 			t.Fatalf("terminating claim reported absent: %v %v", resp, err)
 		}
@@ -227,7 +227,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 		if err := waitAbsent(pvc.Name, pvc.UID); err != nil {
 			t.Fatal(err)
 		}
-		resp, err = client.RemoveVolumeChecked(ctx, req)
+		resp, err = client.RemoveVolumeBound(ctx, req)
 		if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT {
 			t.Fatalf("physical absence not confirmed: %v %v", resp, err)
 		}
@@ -236,7 +236,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 			t.Fatal(err)
 		}
 		owned[pvc.Name] = replacement.UID
-		resp, err = client.RemoveVolumeChecked(ctx, req)
+		resp, err = client.RemoveVolumeBound(ctx, req)
 		if status.Code(err) != codes.FailedPrecondition || resp != nil {
 			t.Fatalf("stale completed deletion retargeted replacement: %v %v", resp, err)
 		}
@@ -293,7 +293,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 				t.Fatal(err)
 			}
 			rpc := volumeRemovalRPC(t, New(Options{Clientset: kube, Namespace: server.namespace, Logger: zap.NewNop()}))
-			resp, err := rpc.RemoveVolumeChecked(ctx, req)
+			resp, err := rpc.RemoveVolumeBound(ctx, req)
 			if changed.Load() != nil {
 				owned[pvc.Name] = changed.Load().UID
 			}
@@ -304,7 +304,7 @@ func testLiveCheckedVolumeRemoval(t *testing.T, ctx context.Context, admin kuber
 			if err != nil || kept.UID != changed.Load().UID || kept.DeletionTimestamp != nil {
 				t.Fatalf("raced claim was deleted: %v", err)
 			}
-			resp, err = rpc.RemoveVolumeChecked(ctx, req)
+			resp, err = rpc.RemoveVolumeBound(ctx, req)
 			if status.Code(err) != codes.FailedPrecondition || resp != nil {
 				t.Fatalf("retry adopted raced ownership: %v %v", resp, err)
 			}

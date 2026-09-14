@@ -85,7 +85,7 @@ func TestVolumeBackendRejectsWrongOrUnavailableScope(t *testing.T) {
 			}
 			req := checkedVolumeRequest(checkedVolumePVC())
 			req.Expected.BackendId = testVolumeBackend
-			resp, err := backendTestServer(client, namespace).RemoveVolumeChecked(context.Background(), req)
+			resp, err := backendTestServer(client, namespace).RemoveVolumeBound(context.Background(), req)
 			if err == nil || resp != nil {
 				t.Fatalf("wrong/unavailable namespace authorized deletion or absence: %v, %v", resp, err)
 			}
@@ -131,7 +131,7 @@ func TestVolumeBackendRechecksInventoryAndAbsence(t *testing.T) {
 				} else {
 					req := checkedVolumeRequest(checkedVolumePVC())
 					req.Expected.BackendId = testVolumeBackend
-					if resp, err := server.RemoveVolumeChecked(context.Background(), req); err == nil || resp != nil {
+					if resp, err := server.RemoveVolumeBound(context.Background(), req); err == nil || resp != nil {
 						t.Fatalf("changed/unavailable scope yielded absence: %v, %v", resp, err)
 					}
 				}
@@ -149,12 +149,24 @@ func TestVolumeBackendRequiresTargetAndReturnsObservedIdentity(t *testing.T) {
 	server := backendTestServer(client, "default")
 	req := checkedVolumeRequest(checkedVolumePVC())
 	req.Expected.BackendId = ""
-	if resp, err := server.RemoveVolumeChecked(context.Background(), req); resp != nil || status.Code(err) != codes.InvalidArgument || len(client.Actions()) != 0 {
+	if resp, err := server.RemoveVolumeBound(context.Background(), req); resp != nil || status.Code(err) != codes.InvalidArgument || len(client.Actions()) != 0 {
 		t.Fatalf("legacy target reached backend: %v, %v", resp, err)
 	}
 	req.Expected.BackendId = testVolumeBackend
-	resp, err := server.RemoveVolumeChecked(context.Background(), req)
+	resp, err := server.RemoveVolumeBound(context.Background(), req)
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT || resp.GetBackendId() != testVolumeBackend {
 		t.Fatalf("verified absence must identify its backend: %v, %v", resp, err)
+	}
+}
+
+func TestVolumeBackendRejectsLegacyCheckedRPC(t *testing.T) {
+	for _, backend := range []string{"", testVolumeBackend} {
+		client := fake.NewSimpleClientset(volumeTestNamespace(), checkedVolumePVC())
+		expected := checkedVolumeRequest(checkedVolumePVC()).Expected
+		expected.BackendId = backend
+		resp, err := backendTestServer(client, "default").RemoveVolumeChecked(context.Background(), &runnerv1.RemoveVolumeCheckedRequest{Expected: expected})
+		if resp != nil || status.Code(err) != codes.FailedPrecondition || len(client.Actions()) != 0 {
+			t.Fatalf("legacy checked RPC reached backend: %v, %v", resp, err)
+		}
 	}
 }
