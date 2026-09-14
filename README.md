@@ -72,6 +72,50 @@ workspace, agent or provider credential is involved. This is not a deployed
 orchestrator/registry/A2A deletion test. The fixture commit is an integration
 artifact, separate from the focused runner production patch and unit tests.
 
+## Control Transport
+
+With `ZITI_ENABLED=true`, the full RunnerService is served only on the OpenZiti
+listener. The plaintext `GRPC_ADDR` listener accepts only the exact unary
+`RunnerService.Ready` RPC; other unary methods and all streams return
+`Unauthenticated`. Request headers cannot opt into control access. Existing
+TCP health probes still connect, but neither TCP connectivity nor `Ready`
+proves successful enrollment or an available overlay terminator.
+
+Previously both listeners shared a full gRPC server, so a client that could
+reach the TCP port could bypass the overlay's service-access policy. Network
+policies may restrict that reachability; this is an application-level closure,
+not a claim that every deployed workload could reach the port. OpenZiti's
+[Dial and Bind policies](https://netfoundry.io/docs/openziti/learn/core-concepts/security/authorization/policies/overview/)
+remain responsible for who may access and provide the overlay service.
+
+Clients using raw TCP for control while the runner has Ziti enabled must move
+to the overlay before rollout. Disabling Ziti is not a secure workaround.
+`ZITI_ENABLED=false` retains the existing standalone plaintext API for trusted
+development or independently protected deployments; this patch does not make
+that mode suitable for untrusted agents. Production must enforce the intended
+transport profile and audit overlay policies and all callers.
+
+Listener separation applies before enrollment starts. Failed startup stops both
+servers, without leaving a plaintext fallback. There is no new API, credential
+format, deployment flag, runtime prompt or workflow dependency.
+
+Verification uses real loopback gRPC connections and a child process running the
+production startup path. It covers every generated unary/streaming RPC,
+forged metadata, similarly named/future service methods, control and standalone
+success, pending/failed enrollment and observed listener closure. The startup
+fixture replaces only the Kubernetes client constructor and uses a blocked
+loopback Gateway stub; it inherits no host, cluster or provider credentials.
+It performs no real Kubernetes operations, enrollment, model calls or deployment
+changes. On the independent transport branch, full `go test -race ./...` passes
+152 tests including subtests; the child
+entry point runs only when launched by its parent test. Build and vet also pass.
+
+This is not an audit of live Dial/Bind policies, real overlay reconnection or
+revocation, per-owner authorization, runner/backend incarnation binding,
+late-operation/node fencing, or a coordinated deployed A2A acceptance. Those
+remain separate requirements; neither this health endpoint nor overlay
+connectivity is proof of the expected storage backend.
+
 ## Local Development
 
 Full setup: [Local Development](https://github.com/agynio/architecture/blob/main/architecture/operations/local-development.md)
