@@ -235,7 +235,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	}
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
-		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
+		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
 		default:
 			return nil, status.Error(codes.PermissionDenied, "fixture_rpc_denied")
@@ -302,6 +302,24 @@ func TestLivePreparedWorkloads(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
+	inspect := func(t *testing.T, binding *runnerv1.WorkloadBinding, activated bool) {
+		t.Helper()
+		if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+			response, err := runner.InspectPreparedWorkload(ctx, &runnerv1.InspectPreparedWorkloadRequest{Expected: binding})
+			if status.Code(err) == codes.Aborted {
+				return false, nil
+			}
+			if err != nil {
+				return false, err
+			}
+			if !proto.Equal(response.GetBinding(), binding) || response.GetWorkload().GetId() != binding.WorkloadId || response.GetResourceVersion() == "" || response.GetActivated() != activated || response.GetRemovalPending() {
+				return false, fmt.Errorf("inspection did not preserve exact binding/state")
+			}
+			return true, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	remove := func(t *testing.T, binding *runnerv1.WorkloadBinding) {
 		t.Helper()
 		if err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 40*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -334,6 +352,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	}
 	t.Run("real-execution-only-after-activation-and-durable-resume", func(t *testing.T) {
 		first := prepare(t, request("durable", `require('fs').appendFileSync('/workspace/turns', 'first\n')`, nil))
+		inspect(t, first, false)
 		for i := 0; i < 12; i++ {
 			pod, err := admin.CoreV1().Pods(ns.Name).Get(ctx, podNameFromID(first.WorkloadId), metav1.GetOptions{})
 			if err != nil || string(pod.UID) != first.InstanceUid || !hasPreparedGate(pod) || pod.Spec.NodeName != "" || len(pod.Status.ContainerStatuses) != 0 || len(pod.Status.InitContainerStatuses) != 0 {
@@ -343,13 +362,18 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		}
 		activate(t, first)
 		waitSucceeded(t, first)
+		inspect(t, first, true)
 		remove(t, first)
+		if _, err := runner.InspectPreparedWorkload(ctx, &runnerv1.InspectPreparedWorkloadRequest{Expected: first}); status.Code(err) != codes.NotFound {
+			t.Fatalf("removed Pod inspection: %v", err)
+		}
 		second := prepare(t, request("durable", `const fs=require('fs'); if(fs.readFileSync('/workspace/turns','utf8')!=='first\n') process.exit(7); fs.appendFileSync('/workspace/turns','second\n'); if(fs.readFileSync('/workspace/turns','utf8')!=='first\nsecond\n') process.exit(8)`, first.Volumes))
 		if first.InstanceUid == second.InstanceUid || !proto.Equal(first.Volumes[0], second.Volumes[0]) {
 			t.Fatal("Pod replacement changed the durable workspace")
 		}
 		activate(t, second)
 		waitSucceeded(t, second)
+		inspect(t, second, true)
 		remove(t, second)
 		t.Logf("12 gated observations; two real successful turns; distinct Pod UIDs; same PVC uid=%s; both removals confirmed", first.Volumes[0].InstanceUid)
 	})
@@ -445,6 +469,9 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		pod, err := admin.CoreV1().Pods(ns.Name).Get(ctx, podNameFromID(binding.WorkloadId), metav1.GetOptions{})
 		if err != nil || string(pod.UID) == binding.InstanceUid || !hasPreparedGate(pod) || pod.Spec.NodeName != "" {
 			t.Fatalf("replacement Pod was activated: %v", err)
+		}
+		if response, err := runner.InspectPreparedWorkload(ctx, &runnerv1.InspectPreparedWorkloadRequest{Expected: binding}); response != nil || status.Code(err) != codes.FailedPrecondition {
+			t.Fatalf("same-name replacement inspected as original: %v", err)
 		}
 		t.Log("real UID/RV PATCH rejected after same-name Pod replacement; replacement remained gated")
 	})
