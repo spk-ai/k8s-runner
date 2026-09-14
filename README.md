@@ -4,6 +4,24 @@ k8s-runner is the Kubernetes-native implementation of the RunnerService gRPC API
 
 Architecture: [k8s-runner](https://github.com/agynio/architecture/blob/main/architecture/k8s-runner.md)
 
+## Volume Inventory Integrity
+
+`ListVolumes` returns `FailedPrecondition` without a partial response if any
+runner-managed PVC has a missing, empty, whitespace-padded or duplicate
+`volume_key`. A successful inventory is used by reconcilers as evidence that
+unlisted volumes are absent, so silently omitting malformed managed claims can
+incorrectly close a retained workspace's record. Unmanaged PVCs remain excluded.
+
+This changes the former skip-missing-key behavior. A damaged inventory requires
+operator ownership reconciliation before volume reconciliation can proceed;
+the runner does not adopt, relabel or delete claims to repair it. This is not
+deletion authorization, a UID precondition, or node/late-create fencing, and it
+does not change `RemoveVolume`. Valid orphan inventory still needs a controller
+that does not infer deletion permission from a stale or scoped registry scan.
+
+After generating the APIs, run `go test -race ./...`. Focused tests are
+`go test -race ./internal/server -run '^TestListVolumes' -count=1`.
+
 ## Local Development
 
 Full setup: [Local Development](https://github.com/agynio/architecture/blob/main/architecture/operations/local-development.md)
