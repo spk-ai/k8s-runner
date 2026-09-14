@@ -26,11 +26,11 @@ func storageServer(t *testing.T, objects ...runtime.Object) (*Server, *fake.Clie
 	}), clientset
 }
 
-func TestRemoveVolumeCheckedDeletesTheClaim(t *testing.T) {
+func TestRemoveVolumeBoundDeletesTheClaim(t *testing.T) {
 	pvc := checkedVolumePVC()
 	server, clientset := storageServer(t, pvc)
 
-	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(pvc))
+	resp, err := server.RemoveVolumeBound(context.Background(), checkedVolumeRequest(pvc))
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
 		t.Fatalf("remove acknowledgement: %v, %v", resp, err)
 	}
@@ -40,23 +40,23 @@ func TestRemoveVolumeCheckedDeletesTheClaim(t *testing.T) {
 	}
 }
 
-func TestRemoveVolumeCheckedIsIdempotent(t *testing.T) {
+func TestRemoveVolumeBoundIsIdempotent(t *testing.T) {
 	server, _ := storageServer(t)
 
-	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(checkedVolumePVC()))
+	resp, err := server.RemoveVolumeBound(context.Background(), checkedVolumeRequest(checkedVolumePVC()))
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT {
 		t.Fatalf("confirmed absence: %v, %v", resp, err)
 	}
 }
 
-func TestRemoveVolumeCheckedKeepsATerminatingClaimPending(t *testing.T) {
+func TestRemoveVolumeBoundKeepsATerminatingClaimPending(t *testing.T) {
 	deleting := metav1.Now()
 	pvc := checkedVolumePVC()
 	pvc.DeletionTimestamp = &deleting
 	pvc.Finalizers = []string{"kubernetes.io/pvc-protection"}
 	server, clientset := storageServer(t, pvc)
 
-	resp, err := server.RemoveVolumeChecked(context.Background(), checkedVolumeRequest(pvc))
+	resp, err := server.RemoveVolumeBound(context.Background(), checkedVolumeRequest(pvc))
 	if err != nil || resp.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING {
 		t.Fatalf("terminating claim: %v, %v", resp, err)
 	}

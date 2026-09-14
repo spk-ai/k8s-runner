@@ -37,6 +37,11 @@ Ordinary namespace metadata updates and runner restarts preserve the identity.
 Both inventory envelopes and removal responses carry the observed identity;
 the controller/registry must pin and validate it, including empty inventory.
 
+Deletion uses the separate `RemoveVolumeBound` RPC so older runners answer
+`Unimplemented` without reaching a handler that ignores the new precondition.
+This runner refuses `RemoveVolumeChecked` before any Kubernetes access. Callers
+must never fall back to that older method or name-only deletion.
+
 When `rbac.create=true`, the chart adds a separate ClusterRole/Binding granting
 only `get` on the named `workloadNamespace` object. It grants no namespace list,
 write or other-namespace access. `workloadNamespace` must match `KUBE_NAMESPACE`;
@@ -44,7 +49,7 @@ when managing RBAC externally, install the same scoped permission. A namespace
 Role alone cannot grant access to the cluster-scoped namespace object. See
 [Kubernetes named-resource RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources).
 
-All 185 independent race tests, including the Helm rendering check, pass; build
+All 186 independent race tests, including the Helm rendering check, pass; build
 and vet pass. Wrong/unavailable namespaces, inventory/absence races and runner
 restart are covered. A separate controller/registry acceptance uses real
 Kubernetes and PostgreSQL. This branch alone does not authenticate the runner
@@ -57,7 +62,7 @@ This branch requires the proposed checked-volume API. `ListVolumes` additionally
 returns each PVC UID and only persistent identity labels; workload/turn labels
 and unrelated metadata are not included in that identity.
 
-`RemoveVolumeChecked` validates the durable expected name, key, UID and complete
+`RemoveVolumeBound` validates the durable expected name, key, UID and complete
 persistent ownership labels against a fresh GET, then uses that UID and the GET's
 resource version as Kubernetes delete preconditions. It refuses missing identity,
 foreign/replacement claims and claims with owner references. Conflicts are not
