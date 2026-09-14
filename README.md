@@ -131,6 +131,73 @@ behavior but sets `pod.spec.runtimeClassName` to match the selected Kata
 implementation. The cluster must provide the matching RuntimeClass and schedule
 onto KVM-capable nodes. This cannot be validated on local k3d/mac setups.
 
+## Workload ResourceQuota
+
+`workloadResourceQuota` adds an opt-in, namespace-wide Kubernetes admission
+budget. It is disabled by default and has no implicit resource allowance.
+Enabling it requires all four CPU/memory totals plus `count/pods`:
+
+```yaml
+workloadNamespace: agyn-workloads
+workloadResourceQuota:
+  enabled: true
+  name: agent-workload-budget
+  hard:
+    requests.cpu: "2"
+    requests.memory: "2Gi"
+    limits.cpu: "4"
+    limits.memory: "4Gi"
+    count/pods: "8"
+```
+
+These are example values, not production sizing recommendations. The quota
+applies to every Pod in `workloadNamespace`, including workloads created by
+other runner instances or tools; it has no agent label selector or scope filter.
+Kubernetes evaluates the assembled Pod, including the effective init/sidecar
+budget, rather than trusting a main-container flavor as a complete task cost.
+See [ResourceQuota](https://v1-33.docs.kubernetes.io/docs/concepts/policy/resource-quotas/)
+and [sidecar accounting](https://v1-33.docs.kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers).
+
+The runner's rendered environment must contain exactly one literal
+`KUBE_NAMESPACE` matching `workloadNamespace`. A missing, dynamic, duplicate or
+mismatched binding fails Helm rendering. Update the existing `env` entry when
+changing the workload namespace; do not add a second entry in `extraEnvVars`.
+The policy does not change the runner's command, security context, RBAC or
+resource allocations. Protect both the quota and runner configuration with
+operator RBAC; this is not protection against a cluster administrator changing
+or deleting them.
+
+Install and verify the quota before enabling workload producers. The selected
+runner and workload profile must provide CPU and memory requests and limits
+for every main, init and supporting container: this policy deliberately does
+not inject fallback container limits. A legacy unbounded Pod is rejected, not
+silently admitted. On quota rejection Kubernetes returns `403 Forbidden`; the
+existing runner maps this to gRPC `PermissionDenied` with the Kubernetes status
+message. This contribution does not reclassify errors or add automatic retries.
+The caller must retain durable state and distinguish a rejected start from an
+ambiguous operation before attempting recovery.
+
+CPU/memory quotas cover nonterminal Pods. `count/pods` also bounds retained Pod
+objects, so failed objects cannot accumulate without consuming object capacity.
+Additional native quota keys, such as `count/persistentvolumeclaims`, are passed
+through; Kubernetes validates their quantities. A PVC count or requested-storage
+quota is not enforcement of bytes written inside a filesystem. This is also
+not a task scheduler, tenant fairness policy, node partition fence, PID/IO cap,
+or proof of fail-closed platform bootstrap. Inspect existing namespace usage and
+all producers before adopting a budget; no resources or retained volumes are
+deleted by this chart feature.
+
+Structured render checks use the existing Kubernetes YAML/types and run in CI:
+
+```sh
+helm dependency build charts/k8s-runner
+go test ./internal/chart -count=1
+```
+
+The chart contribution is independent of A2A and agent runtimes. Live runner
+admission, including supporting-container accounting and release/reuse, needs
+separate acceptance with the resource-aware integration build.
+
 ## Workload egress NetworkPolicy
 
 The Helm chart can install the static egress NetworkPolicy used by egress v1.

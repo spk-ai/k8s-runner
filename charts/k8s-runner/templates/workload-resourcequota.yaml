@@ -1,0 +1,69 @@
+{{- /* SPDX-License-Identifier: AGPL-3.0-only */ -}}
+{{- $quota := .Values.workloadResourceQuota | default (dict) -}}
+{{- if not (kindIs "map" $quota) -}}
+  {{- fail "workloadResourceQuota must be a map" -}}
+{{- end -}}
+{{- range $key, $_ := $quota -}}
+  {{- if not (has $key (list "enabled" "name" "hard")) -}}
+    {{- fail (printf "unsupported workloadResourceQuota option: %s" $key) -}}
+  {{- end -}}
+{{- end -}}
+{{- $enabled := get $quota "enabled" -}}
+{{- if not (kindIs "bool" $enabled) -}}
+  {{- fail "workloadResourceQuota.enabled must be a boolean" -}}
+{{- end -}}
+{{- if $enabled -}}
+  {{- $name := $quota.name -}}
+  {{- if or (not (kindIs "string" $name)) (eq (trim $name) "") -}}
+    {{- fail "workloadResourceQuota.name is required" -}}
+  {{- end -}}
+  {{- $namespace := .Values.workloadNamespace -}}
+  {{- if or (not (kindIs "string" $namespace)) (eq (trim $namespace) "") (ne $namespace (trim $namespace)) -}}
+    {{- fail "workloadResourceQuota: workloadNamespace must be explicit" -}}
+  {{- end -}}
+  {{- $hard := $quota.hard -}}
+  {{- if not (kindIs "map" $hard) -}}
+    {{- fail "workloadResourceQuota.hard must be a map" -}}
+  {{- end -}}
+  {{- range $key := list "requests.cpu" "requests.memory" "limits.cpu" "limits.memory" "count/pods" -}}
+    {{- if not (hasKey $hard $key) -}}
+      {{- fail (printf "workloadResourceQuota.hard requires %s" $key) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- range $_, $value := $hard -}}
+    {{- if not (or (kindIs "string" $value) (kindIs "float64" $value) (kindIs "int64" $value) (kindIs "int" $value)) -}}
+      {{- fail "workloadResourceQuota.hard values must be scalar quantities" -}}
+    {{- end -}}
+    {{- if and (kindIs "string" $value) (eq (trim $value) "") -}}
+      {{- fail "workloadResourceQuota.hard values must be scalar quantities" -}}
+    {{- end -}}
+  {{- end -}}
+  {{- /* Validate the library's rendered environment, not a separate merge rule. */ -}}
+  {{- $env := include "service-base.renderEnv" . | fromYaml -}}
+  {{- $bindings := list -}}
+  {{- range $entry := $env.env | default (list) -}}
+    {{- if eq $entry.name "KUBE_NAMESPACE" -}}
+      {{- $bindings = append $bindings $entry -}}
+    {{- end -}}
+  {{- end -}}
+  {{- if ne (len $bindings) 1 -}}
+    {{- fail "workloadResourceQuota requires exactly one literal KUBE_NAMESPACE in the runner environment" -}}
+  {{- end -}}
+  {{- $binding := index $bindings 0 -}}
+  {{- if or (hasKey $binding "valueFrom") (not (kindIs "string" $binding.value)) -}}
+    {{- fail "workloadResourceQuota requires exactly one literal KUBE_NAMESPACE in the runner environment" -}}
+  {{- end -}}
+  {{- if ne $binding.value $namespace -}}
+    {{- fail "workloadResourceQuota: KUBE_NAMESPACE must match workloadNamespace" -}}
+  {{- end }}
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ $namespace | quote }}
+  labels:
+{{ include "service-base.labels" . | nindent 4 }}
+spec:
+  hard:
+{{ toYaml $hard | nindent 4 }}
+{{- end }}
