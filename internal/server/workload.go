@@ -668,20 +668,20 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 		return "", status.Errorf(codes.InvalidArgument, "invalid_pvc_name: %s", strings.Join(errs, ", "))
 	}
 
-	if _, err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).Get(ctx, pvcName, metav1.GetOptions{}); err == nil {
-		return pvcName, nil
-	} else if !apierrors.IsNotFound(err) {
-		return "", grpcErrorFromKube(s.logger, err, codes.Internal)
-	}
-
 	requestSize, err := resource.ParseQuantity(s.storageSize)
 	if err != nil {
 		return "", status.Errorf(codes.Internal, "invalid_storage_size: %v", err)
+	}
+	if requestSize.Sign() <= 0 {
+		return "", status.Error(codes.Internal, "invalid_storage_size: must be positive")
 	}
 	if size := strings.TrimSpace(volume.GetSize()); size != "" {
 		requestSize, err = resource.ParseQuantity(size)
 		if err != nil {
 			return "", status.Errorf(codes.InvalidArgument, "invalid_volume_size: %v", err)
+		}
+		if requestSize.Sign() <= 0 {
+			return "", status.Error(codes.InvalidArgument, "invalid_volume_size: must be positive")
 		}
 	}
 
@@ -726,12 +726,40 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	if err := addLabels(pvc.Labels, volume.GetLabels()); err != nil {
 		return "", status.Errorf(codes.InvalidArgument, "invalid_volume_label: %v", err)
 	}
-
-	if _, err := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace).Create(ctx, pvc, metav1.CreateOptions{}); err != nil {
-		return "", grpcErrorFromKube(s.logger, err, codes.Internal)
+	if strings.TrimSpace(volume.GetLabels()[volumeKeyLabelKey]) == "" {
+		return "", status.Error(codes.InvalidArgument, "volume_key_required: named volumes must identify their persistent record")
+	}
+	for _, key := range pvcIdentityLabelKeys {
+		if value, present := pvc.Labels[key]; present && value == "" {
+			return "", status.Errorf(codes.InvalidArgument, "invalid_volume_owner_label: %s must not be empty", key)
+		}
+		if value, present := labels[key]; present && pvc.Labels[key] != value {
+			return "", status.Errorf(codes.InvalidArgument, "conflicting_volume_owner_label: %s", key)
+		}
 	}
 
-	s.logger.Info("created pvc", zap.String("pvc", pvcName))
+	claims := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace)
+	existing, err := claims.Get(ctx, pvcName, metav1.GetOptions{})
+	created := false
+	if apierrors.IsNotFound(err) {
+		existing, err = claims.Create(ctx, pvc, metav1.CreateOptions{})
+		created = err == nil
+		if apierrors.IsAlreadyExists(err) {
+			// A competing create can win after the read. Its claim needs the
+			// same validation; a name collision is not ownership evidence.
+			existing, err = claims.Get(ctx, pvcName, metav1.GetOptions{})
+		}
+	}
+	if err != nil {
+		return "", grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if err := validatePVCReuse(existing, pvc); err != nil {
+		return "", err
+	}
+
+	if created {
+		s.logger.Info("created pvc", zap.String("pvc", pvcName))
+	}
 	return pvcName, nil
 }
 
