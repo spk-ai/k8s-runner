@@ -2,6 +2,9 @@
 
 k8s-runner is the Kubernetes-native implementation of the RunnerService gRPC API.
 
+The dependent [preparation-revocation proposal](PREPARATION-REVOCATION.md)
+recovers unbound interrupted provisioning using durable native evidence.
+
 Architecture: [k8s-runner](https://github.com/agynio/architecture/blob/main/architecture/k8s-runner.md)
 
 ## Volume Inventory Integrity

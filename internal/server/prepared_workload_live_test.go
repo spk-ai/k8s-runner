@@ -88,6 +88,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	backend := "kubernetes-namespace/v1/" + ns.Name + "/" + string(ns.UID)
 	ownedPods, ownedClaims := map[string]types.UID{}, map[string]types.UID{}
 	ownedAnchors := map[string]*runnerv1.ResourceAnchor{}
+	ownedRevocations := map[string]*runnerv1.PreparationRevocation{}
 	var bindings []*runnerv1.WorkloadBinding
 	var role *rbacv1.ClusterRole
 	var roleBinding *rbacv1.ClusterRoleBinding
@@ -161,6 +162,14 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		}
 		for _, cm := range anchors.Items {
 			if pvcNamespaceCA(&cm) {
+				continue
+			}
+			if expected := ownedRevocations[cm.Name]; expected != nil {
+				actual, err := server.readPreparationRevocation(cleanup, expected)
+				if err != nil || !proto.Equal(actual, expected) || string(cm.UID) != expected.InstanceUid {
+					t.Error("revocation record identity changed; namespace cleanup refused")
+					return
+				}
 				continue
 			}
 			expected := ownedAnchors[cm.Name]
@@ -263,6 +272,8 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
 		case runnerv1.RunnerService_ReserveResourceAnchor_FullMethodName, runnerv1.RunnerService_PrepareAnchoredWorkload_FullMethodName, runnerv1.RunnerService_RemoveWorkloadAnchor_FullMethodName, runnerv1.RunnerService_RemoveVolumeAnchored_FullMethodName:
+			return handler(ctx, req)
+		case runnerv1.RunnerService_RevokeWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ObservePreparationRevocation_FullMethodName:
 			return handler(ctx, req)
 		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ObserveWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
@@ -696,6 +707,230 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		intent.InstanceUid, intent.ResourceId = "", uuid.NewString()
 		req.WorkloadAnchor = reserveAnchor(t, intent)
 		req.Preparation.Workload.WorkloadId = intent.ResourceId
+	}
+	revokePreparation := func(t *testing.T, req *runnerv1.PrepareAnchoredWorkloadRequest) *runnerv1.PreparationRevocation {
+		t.Helper()
+		response, err := runner.RevokeWorkloadPreparation(ctx, revokeRequest(req))
+		if err != nil || response.GetRevocation() == nil {
+			t.Fatalf("native preparation revocation failed: %v", err)
+		}
+		receipt := response.Revocation
+		if _, err := canonicalPreparationRevocation(receipt, true); err != nil || !proto.Equal(receipt.WorkloadAnchor, req.WorkloadAnchor) {
+			t.Fatalf("native revocation identity invalid: %v", err)
+		}
+		ownedRevocations[preparationRevocationName(req.WorkloadAnchor)] = receipt
+		return receipt
+	}
+	observeRevoked := func(t *testing.T, receipt *runnerv1.PreparationRevocation) *runnerv1.ObservePreparationRevocationResponse {
+		t.Helper()
+		var observation *runnerv1.ObservePreparationRevocationResponse
+		if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+			response, err := runner.ObservePreparationRevocation(ctx, &runnerv1.ObservePreparationRevocationRequest{Expected: receipt})
+			if err != nil || !proto.Equal(response.GetRevocation(), receipt) {
+				return false, fmt.Errorf("revoked preparation observation changed: %v", err)
+			}
+			observation = response
+			return response.State == runnerv1.RevokedPreparationState_REVOKED_PREPARATION_STATE_POD_ABSENT, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return observation
+	}
+	for _, sandbox := range []bool{false, true} {
+		for _, zero := range []bool{false, true} {
+			t.Run("preparation-revocation-before-create-"+map[bool]string{false: "agent", true: "sandbox"}[sandbox]+map[bool]string{false: "-volume", true: "-zero"}[zero], func(t *testing.T) {
+				req := anchoredRequest(t, sandbox, zero, `process.exit(9)`)
+				receipt := revokePreparation(t, req)
+				observation := observeRevoked(t, receipt)
+				if receipt.SelectedPodUid != "" || len(observation.Volumes) != 0 || len(observation.AbsentVolumeIds) != len(req.VolumeAnchors) {
+					t.Fatal("empty preparation fabricated native identities")
+				}
+				if !proto.Equal(receipt, revokePreparation(t, req)) {
+					t.Fatal("revocation changed after native owner deletion")
+				}
+				if _, err := runner.PrepareAnchoredWorkload(ctx, req); err == nil {
+					t.Fatal("old anchor authorized preparation")
+				}
+				intent := proto.Clone(req.WorkloadAnchor).(*runnerv1.ResourceAnchor)
+				intent.InstanceUid = ""
+				if _, err := runner.ReserveResourceAnchor(ctx, &runnerv1.ReserveResourceAnchorRequest{Intent: intent}); status.Code(err) != codes.FailedPrecondition {
+					t.Fatal("revoked workload ID was reserved again")
+				}
+			})
+		}
+	}
+	for _, prepared := range []bool{false, true} {
+		for _, stage := range []string{"revocation-claim-reply", "revocation-receipt-reply", "revocation-delete-reply"} {
+			t.Run("preparation-revocation-SIGKILL-"+stage+map[bool]string{false: "-empty-sandbox", true: "-gated-agent"}[prepared], func(t *testing.T) {
+				req := anchoredRequest(t, !prepared, !prepared, `process.exit(9)`)
+				var binding *runnerv1.WorkloadBinding
+				if prepared {
+					binding = prepareAnchored(t, req)
+				}
+				data, err := protojson.Marshal(revokeRequest(req))
+				if err != nil {
+					t.Fatal(err)
+				}
+				killPreparedSecretProcess(t, preparedSecretCrashSpec{Kubeconfig: kubeconfig, Namespace: ns.Name, Account: account.Name, Stage: stage, Revocation: data})
+				var priorUID types.UID
+				cm, err := admin.CoreV1().ConfigMaps(ns.Name).Get(ctx, preparationRevocationName(req.WorkloadAnchor), metav1.GetOptions{})
+				if stage == "revocation-claim-reply" {
+					if !apierrors.IsNotFound(err) {
+						t.Fatal("claim checkpoint included an unissued receipt CREATE")
+					}
+				} else {
+					if err != nil || !validPreparedID(string(cm.UID)) {
+						t.Fatalf("committed immutable receipt missing: %v", err)
+					}
+					priorUID = cm.UID
+				}
+				receipt := revokePreparation(t, req)
+				if priorUID != "" && receipt.InstanceUid != string(priorUID) || receipt.SelectedPodUid != binding.GetInstanceUid() {
+					t.Fatal("crash recovery changed the native receipt or Pod selection")
+				}
+				observation := observeRevoked(t, receipt)
+				if len(observation.Volumes) != len(binding.GetVolumes()) || len(observation.AbsentVolumeIds) != 0 {
+					t.Fatal("crash recovery lost the workspace inventory")
+				}
+				if binding != nil && !proto.Equal(observation.Volumes[0], binding.Volumes[0]) {
+					t.Fatal("crash recovery substituted the persistent workspace")
+				}
+				t.Logf("SIGKILL after actual %s; exact immutable receipt recovered; gated=%t; natural Pod GC and retained workspace verified", stage, prepared)
+			})
+		}
+	}
+	for _, revocationWins := range []bool{false, true} {
+		t.Run("preparation-revocation-CAS-"+map[bool]string{false: "activation-wins", true: "revocation-wins"}[revocationWins], func(t *testing.T) {
+			req := anchoredRequest(t, revocationWins, true, `process.exit(0)`)
+			binding := prepareAnchored(t, req)
+			var intercepted atomic.Bool
+			var patchStatus atomic.Int32
+			var receipt *runnerv1.PreparationRevocation
+			raceConfig := rest.CopyConfig(runnerConfig)
+			raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+				return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+					matched := request.Method == http.MethodPatch && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/configmaps/"+resourceAnchorName(req.WorkloadAnchor)
+					if matched && intercepted.CompareAndSwap(false, true) {
+						if revocationWins {
+							receipt = revokePreparation(t, req)
+						} else {
+							activate(t, binding)
+						}
+					}
+					response, err := next.RoundTrip(request)
+					if matched && err == nil {
+						patchStatus.Store(int32(response.StatusCode))
+					}
+					return response, err
+				})
+			})
+			raceClient, err := kubernetes.NewForConfig(raceConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if revocationWins {
+				response, err := serverFor(raceClient).ActivateWorkload(ctx, &runnerv1.ActivateWorkloadRequest{Expected: binding})
+				if err == nil || response != nil || !intercepted.Load() || patchStatus.Load() != http.StatusNotFound {
+					t.Fatalf("revocation did not fence activation: code=%s patch=%d", status.Code(err), patchStatus.Load())
+				}
+				observeRevoked(t, receipt)
+			} else {
+				response, err := serverFor(raceClient).RevokeWorkloadPreparation(ctx, revokeRequest(req))
+				if err == nil || response != nil || !intercepted.Load() || patchStatus.Load() != http.StatusUnprocessableEntity && patchStatus.Load() != http.StatusConflict {
+					t.Fatalf("activation did not fence revocation: code=%s patch=%d", status.Code(err), patchStatus.Load())
+				}
+				if _, err := admin.CoreV1().ConfigMaps(ns.Name).Get(ctx, preparationRevocationName(req.WorkloadAnchor), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+					t.Fatal("activated workload received an unactivated receipt")
+				}
+				waitSucceeded(t, binding)
+				remove(t, binding)
+				if _, err := runner.RevokeWorkloadPreparation(ctx, revokeRequest(req)); status.Code(err) != codes.FailedPrecondition {
+					t.Fatal("completed and absent Pod was misclassified as never activated")
+				}
+				revokeAnchor(t, req.WorkloadAnchor)
+			}
+			t.Logf("actual native owner PATCH contention; revocation wins=%t; losing PATCH=%d", revocationWins, patchStatus.Load())
+		})
+	}
+	for _, resource := range []string{"pods", "persistentvolumeclaims"} {
+		t.Run("preparation-revocation-late-"+resource, func(t *testing.T) {
+			req := anchoredRequest(t, resource == "pods", false, `process.exit(9)`)
+			var intercepted atomic.Bool
+			var receipt *runnerv1.PreparationRevocation
+			var committed *corev1.Pod
+			var volume *runnerv1.VolumeListItem
+			raceConfig := rest.CopyConfig(runnerConfig)
+			raceConfig.ContentType, raceConfig.AcceptContentTypes = "application/json", "application/json"
+			raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+				return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+					matched := request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/"+resource
+					if matched && intercepted.CompareAndSwap(false, true) {
+						receipt = revokePreparation(t, req)
+						before := observeRevoked(t, receipt)
+						if resource == "persistentvolumeclaims" && (len(before.AbsentVolumeIds) != 1 || len(before.Volumes) != 0) {
+							t.Fatal("pre-create observation invented a workspace")
+						}
+					}
+					response, err := next.RoundTrip(request)
+					if !matched || err != nil || response.StatusCode != http.StatusCreated {
+						return response, err
+					}
+					data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(bytes.NewReader(data))
+					if err != nil || len(data) >= 1<<20 {
+						t.Fatal("late native CREATE response unreadable")
+					}
+					if resource == "pods" {
+						committed = &corev1.Pod{}
+						if err := json.Unmarshal(data, committed); err != nil || server.validateRevocationPod(committed, receipt) != nil || committed.Labels[ownerLabel] != run {
+							t.Fatalf("late Pod could not be proven gated and owned: %v", err)
+						}
+						binding := preparedBindingFromPod(t, committed)
+						ownedPods[committed.Name] = committed.UID
+						bindings = append(bindings, binding)
+						volume = binding.Volumes[0]
+					} else {
+						claim := &corev1.PersistentVolumeClaim{}
+						if err := json.Unmarshal(data, claim); err != nil || matchAnchoredMetadata(claim.ObjectMeta, req.VolumeAnchors[0]) != nil || claim.Labels[ownerLabel] != run {
+							t.Fatalf("late PVC ownership changed: %v", err)
+						}
+						volume, err = preparedVolume(claim, backend)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					ownedClaims[volume.InstanceId] = types.UID(volume.InstanceUid)
+					return response, nil
+				})
+			})
+			raceClient, err := kubernetes.NewForConfig(raceConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response, err := serverFor(raceClient).PrepareAnchoredWorkload(ctx, req); err == nil || response != nil || !intercepted.Load() || volume == nil {
+				t.Fatalf("late native creation was not committed and rejected: %v", err)
+			}
+			observation := observeRevoked(t, receipt)
+			if len(observation.Volumes) != 1 || len(observation.AbsentVolumeIds) != 0 || !proto.Equal(observation.Volumes[0], volume) {
+				t.Fatal("late workspace was not recovered with its original identity")
+			}
+			if committed != nil {
+				waitSecretsAbsent(t, parseSecretAnnotation(committed.Annotations))
+			}
+			freshWorkloadAnchor(t, req)
+			req.Preparation.ExpectedVolumes = []*runnerv1.VolumeListItem{volume}
+			req.Preparation.Workload.Main.Cmd = []string{"-e", `require('fs').writeFileSync('/workspace/revocation-recovered', 'ok')`}
+			binding := prepareAnchored(t, req)
+			if !proto.Equal(binding.Volumes[0], volume) {
+				t.Fatal("explicit new workload substituted the recovered workspace")
+			}
+			activate(t, binding)
+			waitSucceeded(t, binding)
+			remove(t, binding)
+			revokeAnchor(t, req.WorkloadAnchor)
+			t.Logf("actual late %s CREATE after an absent observation; old activation revoked, native GC observed, exact PVC retained and reused by explicit new workload", resource)
+		})
 	}
 	for _, sandbox := range []bool{false, true} {
 		t.Run("anchored-durable-resume-"+map[bool]string{false: "agent", true: "sandbox"}[sandbox], func(t *testing.T) {
