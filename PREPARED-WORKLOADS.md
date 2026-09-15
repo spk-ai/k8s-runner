@@ -1,9 +1,9 @@
 # Prepared Workloads
 
-Dependent native implementation with read-only inspection added to prepared
-runner `4023808`. This branch requires the matching
-`feat/prepared-workload-inspection` API, based on registry API `4f957e5`.
-It is not a drop-in image for installed controllers.
+Dependent preparation-observation implementation on atomic-Secret runner
+`1f33556`. This branch requires the matching `feat/prepared-outcome-observation`
+API, based on inspection API `24b73ca`. It is not a drop-in image for installed
+controllers. No installed platform deployment changes in these fixtures.
 
 ## Native Contract
 
@@ -57,12 +57,45 @@ deletion-pending flag and resource version. Activation is not container readines
 This is not an atomic multi-resource snapshot, authenticated receipt, recovery
 of an unknown prepare intent, or node/storage fencing.
 
-Native `preparing` is not inspectable as a completed prepared workload. Recovery
-of a lost prepare response still requires a separate, identity-checked discovery
-contract; it must not infer completion from Pod absence or replay preparation.
+Native `preparing` is not inspectable as a completed prepared workload. The
+separate preparation-observation contract below permits retirement discovery,
+not inference of setup completion or authority to replay preparation.
 
 Inspection adds no RBAC mutation rights. The focused tests assert GET-only
 Kubernetes actions for successful, conflicting and failed inspections.
+
+## Lost Preparation Observation
+
+`ObserveWorkloadPreparation` takes the original workload intent UUID and backend
+ID. It returns an exact binding only for a gated, unscheduled Pod in `preparing`
+or `prepared` state, with no current or prior container execution, including
+init and ephemeral containers. Pod creation now records the atomic-credential
+contract marker `agyn.io/preparation-recovery=pod-owned-secrets/v1`. Older Pods
+without this marker are refused because their Secrets may have been ownerless.
+
+The method checks the Pod's stored intent, actual UID, all named claim UIDs and
+owners, non-deleting/non-lost claims, stable Pod resource version across two
+reads, and backend identity before and after inspection. Only manager and
+agent/instance/thread or sandbox/owner labels are returned. No Secret read/list,
+Kubernetes mutation, activation or name-only removal occurs. This remains a
+checked observation, not an atomic multi-resource snapshot or signed receipt.
+
+The controller must durably enter REMOVING, validate the full owner and volume
+set, persist checked volume/workload bindings and retire that exact Pod through
+the existing removal API. A pending Pod deletion is observable; native absence
+is not. NotFound and Unimplemented retain admission and never permit another
+prepare. In particular, initially absent and delayed Pod/PVC creation remain
+unresolved rather than being reported safe to retry.
+
+On 2026-09-15, the full native race suite passes 551 test entries, with seven
+opt-in/child entries skipped outside their gates; build and unfiltered vet pass.
+The isolated Kubernetes run passes eight scenarios plus parent with no skips.
+Its four SIGKILL cases now use this real RPC to recover interrupted bindings,
+then independently compare Pod/PVC identities and observe exact removal and
+Secret GC. It still includes real execution/resume, stale activation, claim
+holds and delayed Secret creation after Pod deletion. Registry/controller
+recovery has a separate combined process fixture; neither fixture runs A2A or
+native agent sessions. The old ownership fix's evidence below is historical.
 
 ## Permissions And Limits
 
@@ -103,9 +136,9 @@ method. The parent independently checks retained state, exact Pod ownership,
 activation denial for incomplete setup, exact removal and observed Secret GC.
 Two held Secret CREATEs also commit after owner deletion and are collected.
 
-The fixture reads the interrupted Pod binding as an operator to perform cleanup.
-That does not implement automatic registry/controller recovery of unknown prepare
-outcomes. Delayed Pod/PVC creation, old unowned credentials, durable external
+That earlier fixture read the interrupted binding as an operator. The current
+fixture uses the new observation RPC, but native-only acceptance does not prove
+registry/controller recovery. Delayed Pod/PVC creation, old unowned credentials, durable external
 credential revocation, Secret-GC completion tracking, all-writer upgrades and
 node/storage fencing remain separate work. No model credentials or A2A agent
 are used. Pod absence alone is not evidence that all credentials are gone.
@@ -142,11 +175,11 @@ confirmed. It uses no A2A controller, registry, model credentials or actual Ziti
 transport, and does not claim those acceptance scopes.
 
 Generate the required local API before building this dependent runner. Run this
-in the matching `api-prepared-inspection` checkout, with adjacent checkouts:
+in the matching `api-prepared-observation` checkout, with adjacent checkouts:
 
 ```bash
-buf generate . --template ../runner-prepared-secret-ownership/buf.gen.yaml \
-  --output ../runner-prepared-secret-ownership --include-imports \
+buf generate . --template ../runner-prepared-observation/buf.gen.yaml \
+  --output ../runner-prepared-observation --include-imports \
   --path proto/agynio/api/runner/v1 \
   --path proto/agynio/api/runners/v1 --path proto/agynio/api/gateway/v1
 ```

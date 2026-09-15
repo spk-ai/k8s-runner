@@ -236,7 +236,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	}
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
-		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
+		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ObserveWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
 		default:
 			return nil, status.Error(codes.PermissionDenied, "fixture_rpc_denied")
@@ -342,7 +342,11 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		if err != nil || pod.Labels[ownerLabel] != run || !hasPreparedGate(pod) || pod.Spec.NodeName != "" || len(pod.Status.ContainerStatuses) != 0 || len(pod.Status.InitContainerStatuses) != 0 {
 			t.Fatalf("interrupted fixture lost identity or executed: %v", err)
 		}
-		binding := preparedBindingFromPod(t, pod)
+		observation, err := runner.ObserveWorkloadPreparation(ctx, &runnerv1.ObserveWorkloadPreparationRequest{WorkloadId: req.Workload.WorkloadId, BackendId: backend})
+		if err != nil || observation.GetResourceVersion() == "" || observation.GetBinding().GetInstanceUid() != string(pod.UID) {
+			t.Fatalf("native interrupted-binding discovery failed: %v", err)
+		}
+		binding := observation.Binding
 		if binding.WorkloadId != req.Workload.WorkloadId || binding.BackendId != backend || len(binding.Volumes) != 1 || binding.Volumes[0].InstanceId != req.Workload.Volumes[0].PersistentName {
 			t.Fatal("interrupted fixture binding mismatch")
 		}
