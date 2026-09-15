@@ -31,13 +31,16 @@ type preparedSecretCrashSpec struct {
 	Stage      string          `json:"stage"`
 	Request    json.RawMessage `json:"request,omitempty"`
 	Revocation json.RawMessage `json:"revocation,omitempty"`
+	Adoption   json.RawMessage `json:"adoption,omitempty"`
 }
 
 func TestPreparedCrashSpecSeparatesOperations(t *testing.T) {
-	for _, revoking := range []bool{false, true} {
+	for _, operation := range []string{"prepare", "revoke", "adopt"} {
 		spec := preparedSecretCrashSpec{}
-		if revoking {
+		if operation == "revoke" {
 			spec.Revocation = json.RawMessage(`{"workloadAnchor":{}}`)
+		} else if operation == "adopt" {
+			spec.Adoption = json.RawMessage(`{"adoption":{}}`)
 		} else {
 			spec.Request = json.RawMessage(`{"workload":{}}`)
 		}
@@ -49,7 +52,7 @@ func TestPreparedCrashSpecSeparatesOperations(t *testing.T) {
 		if err := json.Unmarshal(data, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		if revoking && (len(decoded.Request) != 0 || len(decoded.Revocation) == 0) || !revoking && (len(decoded.Request) == 0 || len(decoded.Revocation) != 0) {
+		if (len(decoded.Request) != 0) != (operation == "prepare") || (len(decoded.Revocation) != 0) != (operation == "revoke") || (len(decoded.Adoption) != 0) != (operation == "adopt") {
 			t.Fatal("unused operation serialized as a nonempty request")
 		}
 	}
@@ -78,16 +81,43 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 		t.Fatal("invalid parent fixture configuration")
 	}
 	revoking := len(spec.Revocation) != 0
+	adopting := len(spec.Adoption) != 0
 	stages := []string{"pod-reply", "first-secret-reply", "last-secret-reply", "readiness-reply"}
 	if revoking {
 		stages = []string{"revocation-claim-reply", "revocation-receipt-reply", "revocation-delete-reply"}
 	}
-	if !slices.Contains(stages, spec.Stage) || revoking && len(spec.Request) != 0 {
+	if adopting {
+		stages = []string{"adoption-owner-reply", "adoption-journal-reply", "adoption-pin-reply", "adoption-apply-reply", "adoption-final-owner-reply", "adoption-final-pvc-reply"}
+	}
+	if !slices.Contains(stages, spec.Stage) || revoking && len(spec.Request) != 0 || adopting && (revoking || len(spec.Request) != 0) {
 		t.Fatal("invalid parent fixture operation")
 	}
 	req := &runnerv1.PrepareWorkloadRequest{}
 	revocation := &runnerv1.RevokeWorkloadPreparationRequest{}
-	if revoking {
+	adoptionReserve := &runnerv1.ReserveVolumeAnchorAdoptionRequest{}
+	adoptionApply := &runnerv1.ApplyVolumeAnchorAdoptionRequest{}
+	adoptionFinalize := &runnerv1.FinalizeVolumeAnchorAdoptionRequest{}
+	var adoptionAnchor *runnerv1.ResourceAnchor
+	var adoptionPVC string
+	if adopting {
+		switch spec.Stage {
+		case "adoption-apply-reply":
+			if err := protojson.Unmarshal(spec.Adoption, adoptionApply); err != nil || validateVolumeAdoption(adoptionApply.Adoption, true) != nil {
+				t.Fatal("invalid apply request")
+			}
+			adoptionAnchor, adoptionPVC = adoptionApply.Adoption.Anchor, adoptionApply.Adoption.Previous.InstanceId
+		case "adoption-final-owner-reply", "adoption-final-pvc-reply":
+			if err := protojson.Unmarshal(spec.Adoption, adoptionFinalize); err != nil || validateVolumeAdoption(adoptionFinalize.Adoption, true) != nil {
+				t.Fatal("invalid finalize request")
+			}
+			adoptionAnchor, adoptionPVC = adoptionFinalize.Adoption.Anchor, adoptionFinalize.Adoption.Previous.InstanceId
+		default:
+			if err := protojson.Unmarshal(spec.Adoption, adoptionReserve); err != nil || validateVolumeAdoptionInput(adoptionReserve.Id, adoptionReserve.Expected, adoptionReserve.Intent, false) != nil {
+				t.Fatal("invalid reserve request")
+			}
+			adoptionAnchor, adoptionPVC = adoptionReserve.Intent, adoptionReserve.Expected.InstanceId
+		}
+	} else if revoking {
 		if err := protojson.Unmarshal(spec.Revocation, revocation); err != nil || revocation.WorkloadAnchor == nil {
 			t.Fatal("invalid revocation request")
 		}
@@ -109,6 +139,7 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	secrets := 0
+	adoptionCreates := 0
 	cfg.Wrap(func(next http.RoundTripper) http.RoundTripper {
 		return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
 			response, err := next.RoundTrip(request)
@@ -128,6 +159,15 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 					spec.Stage == "revocation-receipt-reply" && request.Method == http.MethodPost && request.URL.Path == path+"/configmaps" ||
 					spec.Stage == "revocation-delete-reply" && request.Method == http.MethodDelete && request.URL.Path == ownerPath
 			}
+			if adopting {
+				if request.Method == http.MethodPost && request.URL.Path == path+"/configmaps" {
+					adoptionCreates++
+				}
+				ownerPath, pvcPath := path+"/configmaps/"+resourceAnchorName(adoptionAnchor), path+"/persistentvolumeclaims/"+adoptionPVC
+				hit = request.Method == http.MethodPost && request.URL.Path == path+"/configmaps" && (spec.Stage == "adoption-owner-reply" && adoptionCreates == 1 || spec.Stage == "adoption-journal-reply" && adoptionCreates == 2) ||
+					request.Method == http.MethodPatch && request.URL.Path == ownerPath && (spec.Stage == "adoption-pin-reply" || spec.Stage == "adoption-final-owner-reply") ||
+					request.Method == http.MethodPatch && request.URL.Path == pvcPath && (spec.Stage == "adoption-apply-reply" || spec.Stage == "adoption-final-pvc-reply")
+			}
 			if hit {
 				if _, err := fmt.Fprintln(checkpoint, "committed"); err != nil {
 					return nil, err
@@ -145,7 +185,16 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 	}
 	s := New(Options{Clientset: client, Namespace: spec.Namespace, StorageSize: "1Mi", Logger: zap.NewNop(),
 		SupportingContainerResources: &config.ComputeResources{RequestsCPU: "50m", RequestsMemory: "64Mi", LimitsCPU: "250m", LimitsMemory: "128Mi"}})
-	if revoking {
+	if adopting {
+		switch spec.Stage {
+		case "adoption-apply-reply":
+			_, err = s.ApplyVolumeAnchorAdoption(ctx, adoptionApply)
+		case "adoption-final-owner-reply", "adoption-final-pvc-reply":
+			_, err = s.FinalizeVolumeAnchorAdoption(ctx, adoptionFinalize)
+		default:
+			_, err = s.ReserveVolumeAnchorAdoption(ctx, adoptionReserve)
+		}
+	} else if revoking {
 		_, err = s.RevokeWorkloadPreparation(ctx, revocation)
 	} else {
 		_, err = s.PrepareWorkload(ctx, req)
