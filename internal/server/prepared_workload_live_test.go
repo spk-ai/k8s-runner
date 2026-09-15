@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
+	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
@@ -335,6 +336,48 @@ func TestLivePreparedWorkloads(t *testing.T) {
 			t.Fatalf("independent Pod absence not confirmed: %v", err)
 		}
 	}
+	recordInterrupted := func(t *testing.T, req *runnerv1.PrepareWorkloadRequest) (*corev1.Pod, *runnerv1.WorkloadBinding) {
+		t.Helper()
+		pod, err := admin.CoreV1().Pods(ns.Name).Get(ctx, podNameFromID(req.Workload.WorkloadId), metav1.GetOptions{})
+		if err != nil || pod.Labels[ownerLabel] != run || !hasPreparedGate(pod) || pod.Spec.NodeName != "" || len(pod.Status.ContainerStatuses) != 0 || len(pod.Status.InitContainerStatuses) != 0 {
+			t.Fatalf("interrupted fixture lost identity or executed: %v", err)
+		}
+		binding := preparedBindingFromPod(t, pod)
+		if binding.WorkloadId != req.Workload.WorkloadId || binding.BackendId != backend || len(binding.Volumes) != 1 || binding.Volumes[0].InstanceId != req.Workload.Volumes[0].PersistentName {
+			t.Fatal("interrupted fixture binding mismatch")
+		}
+		if err := server.matchPreparedPod(pod, binding); err != nil {
+			t.Fatal(err)
+		}
+		bindings = append(bindings, binding)
+		ownedPods[pod.Name] = pod.UID
+		for _, target := range binding.Volumes {
+			claim, err := admin.CoreV1().PersistentVolumeClaims(ns.Name).Get(ctx, target.InstanceId, metav1.GetOptions{})
+			if err != nil || claim.Labels[ownerLabel] != run {
+				t.Fatalf("interrupted claim ownership unconfirmed: %v", err)
+			}
+			if err := matchPreparedPVC(claim, target, ns.Name); err != nil {
+				t.Fatal(err)
+			}
+			ownedClaims[claim.Name] = claim.UID
+		}
+		return pod, binding
+	}
+	waitSecretsAbsent := func(t *testing.T, names []string) {
+		t.Helper()
+		if err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+			for _, name := range names {
+				_, err := admin.CoreV1().Secrets(ns.Name).Get(ctx, name, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return false, err
+			}
+			return true, nil
+		}); err != nil {
+			t.Fatalf("exact fixture Secret absence unconfirmed: %v", err)
+		}
+	}
 	waitSucceeded := func(t *testing.T, binding *runnerv1.WorkloadBinding) {
 		t.Helper()
 		if err := wait.PollUntilContextTimeout(ctx, 250*time.Millisecond, 75*time.Second, true, func(ctx context.Context) (bool, error) {
@@ -474,5 +517,87 @@ func TestLivePreparedWorkloads(t *testing.T) {
 			t.Fatalf("same-name replacement inspected as original: %v", err)
 		}
 		t.Log("real UID/RV PATCH rejected after same-name Pod replacement; replacement remained gated")
+	})
+	for _, stage := range []string{"pod-reply", "first-secret-reply", "last-secret-reply", "readiness-reply"} {
+		t.Run("SIGKILL-"+stage, func(t *testing.T) {
+			req := request("crash-"+stage, `process.exit(9)`, nil)
+			req.Workload.ImagePullCredentials = preparedSecretsRequest().Workload.ImagePullCredentials
+			data, err := protojson.Marshal(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			killPreparedSecretProcess(t, preparedSecretCrashSpec{Kubeconfig: kubeconfig, Namespace: ns.Name, Account: account.Name, Stage: stage, Request: data})
+			pod, binding := recordInterrupted(t, req)
+			expectedState, expectedSecrets := "preparing", 2
+			if stage == "pod-reply" {
+				expectedSecrets = 0
+			} else if stage == "first-secret-reply" {
+				expectedSecrets = 1
+			} else if stage == "readiness-reply" {
+				expectedState = "prepared"
+			}
+			if pod.Annotations[preparedStateAnnotation] != expectedState {
+				t.Fatal("crash lost the preparation checkpoint")
+			}
+			count := 0
+			for _, name := range parseSecretAnnotation(pod.Annotations) {
+				secret, err := admin.CoreV1().Secrets(ns.Name).Get(ctx, name, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				if err != nil || len(secret.OwnerReferences) != 1 || secret.OwnerReferences[0].APIVersion != "v1" || secret.OwnerReferences[0].Kind != "Pod" || secret.OwnerReferences[0].UID != pod.UID || secret.OwnerReferences[0].Name != pod.Name {
+					t.Fatalf("crash left an unowned credential: %v", err)
+				}
+				count++
+			}
+			if count != expectedSecrets {
+				t.Fatalf("wrong committed Secret count: got %d want %d", count, expectedSecrets)
+			}
+			if expectedState == "preparing" {
+				if _, err := runner.ActivateWorkload(ctx, &runnerv1.ActivateWorkloadRequest{Expected: binding}); status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("interrupted setup could activate: %v", err)
+				}
+			}
+			remove(t, binding)
+			waitSecretsAbsent(t, parseSecretAnnotation(pod.Annotations))
+			t.Logf("SIGKILL after %s; state=%s; %d atomically owned Secrets; exact Pod removal and Secret GC confirmed", stage, expectedState, count)
+		})
+	}
+	t.Run("delayed-secret-create-after-owner-removal", func(t *testing.T) {
+		req := request("late-secret", `process.exit(9)`, nil)
+		req.Workload.ImagePullCredentials = preparedSecretsRequest().Workload.ImagePullCredentials
+		var original *corev1.Pod
+		var intercepted atomic.Bool
+		var secretCommits atomic.Int32
+		raceConfig := rest.CopyConfig(runnerConfig)
+		raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+			return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+				if request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/secrets" && intercepted.CompareAndSwap(false, true) {
+					var binding *runnerv1.WorkloadBinding
+					original, binding = recordInterrupted(t, req)
+					remove(t, binding)
+				}
+				response, err := next.RoundTrip(request)
+				if err == nil && request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/secrets" && response.StatusCode >= 200 && response.StatusCode < 300 {
+					secretCommits.Add(1)
+				}
+				return response, err
+			})
+		})
+		raceClient, err := kubernetes.NewForConfig(raceConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := serverFor(raceClient).PrepareWorkload(ctx, req); err == nil || response != nil || !intercepted.Load() {
+			t.Fatalf("late creation unexpectedly completed preparation: %v", err)
+		}
+		if secretCommits.Load() != 2 {
+			t.Fatalf("late Secret writes were not both committed: %d", secretCommits.Load())
+		}
+		waitSecretsAbsent(t, parseSecretAnnotation(original.Annotations))
+		if _, err := admin.CoreV1().Pods(ns.Name).Get(ctx, original.Name, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("late Secret operation recreated the Pod: %v", err)
+		}
+		t.Log("held Secret CREATE completed after exact owner deletion; no Pod recreated; late credentials garbage-collected")
 	})
 }
