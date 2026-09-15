@@ -262,7 +262,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	}
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
-		case runnerv1.RunnerService_ReserveResourceAnchor_FullMethodName, runnerv1.RunnerService_PrepareAnchoredWorkload_FullMethodName, runnerv1.RunnerService_RemoveWorkloadAnchor_FullMethodName:
+		case runnerv1.RunnerService_ReserveResourceAnchor_FullMethodName, runnerv1.RunnerService_PrepareAnchoredWorkload_FullMethodName, runnerv1.RunnerService_RemoveWorkloadAnchor_FullMethodName, runnerv1.RunnerService_RemoveVolumeAnchored_FullMethodName:
 			return handler(ctx, req)
 		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ObserveWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
@@ -786,6 +786,103 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		revokeAnchor(t, req.WorkloadAnchor)
 		t.Log("activation claim advanced actual ConfigMap revision; stale DELETE returned 409; exact Pod removal required before anchor retirement")
 	})
+	for _, replaceOwner := range []bool{false, true} {
+		t.Run("retired-volume-late-create-"+map[bool]string{false: "absent-owner", true: "replaced-owner"}[replaceOwner], func(t *testing.T) {
+			req := anchoredRequest(t, replaceOwner, false, `process.exit(9)`)
+			var originalCreate *corev1.PersistentVolumeClaim
+			captureConfig := rest.CopyConfig(runnerConfig)
+			captureConfig.ContentType, captureConfig.AcceptContentTypes = "application/json", "application/json"
+			captureConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+				return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+					if request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/persistentvolumeclaims" {
+						data, err := io.ReadAll(io.LimitReader(request.Body, 1<<20))
+						_ = request.Body.Close()
+						request.Body = io.NopCloser(bytes.NewReader(data))
+						if err != nil || len(data) >= 1<<20 || originalCreate != nil {
+							t.Fatal("expected exactly one bounded original PVC CREATE")
+						}
+						originalCreate = &corev1.PersistentVolumeClaim{}
+						if err := json.Unmarshal(data, originalCreate); err != nil || originalCreate.UID != "" || originalCreate.ResourceVersion != "" ||
+							len(originalCreate.Finalizers) != 0 || originalCreate.Spec.VolumeName != "" || originalCreate.Labels[ownerLabel] != run ||
+							matchAnchoredMetadata(originalCreate.ObjectMeta, req.VolumeAnchors[0]) != nil {
+							t.Fatalf("original CREATE was not an unbound anchored fixture PVC: %v", err)
+						}
+					}
+					return next.RoundTrip(request)
+				})
+			})
+			captureClient, err := kubernetes.NewForConfig(captureConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			prepared, err := serverFor(captureClient).PrepareAnchoredWorkload(ctx, req)
+			if err != nil || originalCreate == nil || prepared.GetBinding() == nil {
+				t.Fatalf("initial anchored preparation failed: %v", err)
+			}
+			binding := recordBinding(t, prepared.Binding)
+			remove(t, binding)
+			revokeAnchor(t, req.WorkloadAnchor)
+			target := binding.Volumes[0]
+			retire := &runnerv1.RemoveVolumeAnchoredRequest{Expected: target}
+			if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+				response, err := runner.RemoveVolumeAnchored(ctx, retire)
+				if status.Code(err) == codes.Aborted {
+					return false, nil
+				}
+				if err != nil || response.GetBackendId() != backend || !proto.Equal(response.GetAnchor(), target.Anchor) {
+					return false, fmt.Errorf("exact retirement response required: %v", err)
+				}
+				return response.State == runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT, nil
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := admin.CoreV1().PersistentVolumeClaims(ns.Name).Get(ctx, target.InstanceId, metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+				t.Fatal("original PVC absence unconfirmed")
+			}
+			if _, err := admin.CoreV1().ConfigMaps(ns.Name).Get(ctx, resourceAnchorName(target.Anchor), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+				t.Fatal("original volume owner absence unconfirmed")
+			}
+			var replacement *runnerv1.ResourceAnchor
+			if replaceOwner {
+				intent := proto.Clone(target.Anchor).(*runnerv1.ResourceAnchor)
+				intent.InstanceUid = ""
+				replacement = reserveAnchor(t, intent)
+				if replacement.InstanceUid == target.Anchor.InstanceUid {
+					t.Fatal("volume owner incarnation did not change")
+				}
+			}
+			// Commit the captured old CREATE after retirement. This models a late
+			// duplicate write, not a new checked binding or permission to reopen.
+			late, err := client.CoreV1().PersistentVolumeClaims(ns.Name).Create(ctx, originalCreate.DeepCopy(), metav1.CreateOptions{})
+			if err != nil || late.UID == types.UID(target.InstanceUid) || !validPreparedID(string(late.UID)) || matchAnchoredMetadata(late.ObjectMeta, target.Anchor) != nil {
+				t.Fatalf("late PVC CREATE did not retain the revoked owner UID: %v", err)
+			}
+			ownedClaims[late.Name] = late.UID
+			// Only Kubernetes GC may remove this different-UID child. No native
+			// removal request is issued until independent GETs observe its absence.
+			if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+				claim, err := admin.CoreV1().PersistentVolumeClaims(ns.Name).Get(ctx, late.Name, metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				if err == nil && (claim.UID != late.UID || matchAnchoredMetadata(claim.ObjectMeta, target.Anchor) != nil) {
+					return false, fmt.Errorf("late fixture child changed identity")
+				}
+				return false, err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			response, err := runner.RemoveVolumeAnchored(ctx, retire)
+			if replacement != nil {
+				if response != nil || status.Code(err) != codes.FailedPrecondition || server.requireResourceAnchor(ctx, replacement) != nil {
+					t.Fatal("old retirement adopted or removed the replacement volume owner")
+				}
+			} else if err != nil || response.GetState() != runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT {
+				t.Fatalf("late-child cleanup did not leave the original target absent: %v", err)
+			}
+			t.Logf("captured old PVC CREATE committed after volume retirement; natural GC observed without direct deletion; replacement-owner case=%t", replaceOwner)
+		})
+	}
 	for _, scenario := range []string{"pods", "pods-replaced-anchor", "persistentvolumeclaims"} {
 		t.Run("late-"+scenario+"-create-after-anchor-revocation", func(t *testing.T) {
 			resource := scenario
