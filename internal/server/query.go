@@ -115,13 +115,11 @@ func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest
 			return nil, status.Error(codes.FailedPrecondition, "volume_inventory_duplicate_key")
 		}
 		keys[volumeKey] = struct{}{}
-		volumes = append(volumes, &runnerv1.VolumeListItem{
-			InstanceId:     pvc.Name,
-			VolumeKey:      volumeKey,
-			InstanceUid:    string(pvc.UID),
-			IdentityLabels: volumeIdentityLabels(pvc.Labels),
-			BackendId:      backend,
-		})
+		item, err := preparedVolume(&pvc, backend)
+		if err != nil {
+			return nil, err
+		}
+		volumes = append(volumes, item)
 	}
 
 	if _, err := s.checkVolumeBackend(ctx, backend); err != nil {

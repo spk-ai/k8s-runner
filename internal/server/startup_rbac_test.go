@@ -48,3 +48,22 @@ func TestStartupSecretChartPermissions(t *testing.T) {
 		t.Fatalf("want one Secret rule, got %d", found)
 	}
 }
+
+func TestResourceAnchorChartPermissions(t *testing.T) {
+	found := 0
+	for _, rule := range startupChartRules(t) {
+		if !slices.Contains(rule.Resources, "configmaps") {
+			continue
+		}
+		found++
+		verbs := slices.Clone(rule.Verbs)
+		slices.Sort(verbs)
+		if !reflect.DeepEqual(verbs, []string{"create", "delete", "get", "patch"}) ||
+			!reflect.DeepEqual(rule.APIGroups, []string{""}) || !reflect.DeepEqual(rule.Resources, []string{"configmaps"}) {
+			t.Fatalf("anchors require named ConfigMap operations without list/watch or wildcard grants: %+v", rule)
+		}
+	}
+	if found != 1 {
+		t.Fatalf("want one ConfigMap rule, got %d", found)
+	}
+}

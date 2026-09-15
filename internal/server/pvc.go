@@ -14,14 +14,18 @@ var pvcIdentityLabelKeys = [...]string{
 }
 
 func validatePVCReuse(existing, desired *corev1.PersistentVolumeClaim) error {
+	if existing != nil && (len(existing.OwnerReferences) != 0 || existing.Annotations[resourceAnchorAnnotation] != "") {
+		return status.Errorf(codes.FailedPrecondition, "pvc_unexpected_owner_reference: %s", existing.Name)
+	}
+	return validatePVCReuseSpec(existing, desired)
+}
+
+func validatePVCReuseSpec(existing, desired *corev1.PersistentVolumeClaim) error {
 	if existing == nil || existing.Name != desired.Name || existing.Namespace != desired.Namespace {
 		return status.Error(codes.FailedPrecondition, "pvc_identity_mismatch")
 	}
 	if existing.DeletionTimestamp != nil || existing.Status.Phase == corev1.ClaimLost {
 		return status.Errorf(codes.FailedPrecondition, "pvc_not_reusable: %s", existing.Name)
-	}
-	if len(existing.OwnerReferences) != 0 {
-		return status.Errorf(codes.FailedPrecondition, "pvc_unexpected_owner_reference: %s", existing.Name)
 	}
 	for _, key := range pvcIdentityLabelKeys {
 		actual, present := existing.Labels[key]

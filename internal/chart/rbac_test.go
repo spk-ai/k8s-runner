@@ -89,7 +89,7 @@ func TestWorkloadRBACScope(t *testing.T) {
 					if err := json.Unmarshal(raw, &role); err != nil {
 						t.Fatal(err)
 					}
-					if (meta.Kind == "ClusterRole") != tc.clusterWide || role.Namespace != tc.namespace || len(role.Rules) != 6 {
+					if (meta.Kind == "ClusterRole") != tc.clusterWide || role.Namespace != tc.namespace || len(role.Rules) != 7 {
 						t.Fatalf("unexpected workload role scope: %+v", role)
 					}
 				case "RoleBinding", "ClusterRoleBinding":

@@ -1,8 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"maps"
 	"net"
 	"net/http"
 	"os"
@@ -72,7 +76,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	run := uuid.NewString()
 	const ownerLabel = "agyn.io/prepared-workload-test"
@@ -83,6 +87,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	}
 	backend := "kubernetes-namespace/v1/" + ns.Name + "/" + string(ns.UID)
 	ownedPods, ownedClaims := map[string]types.UID{}, map[string]types.UID{}
+	ownedAnchors := map[string]*runnerv1.ResourceAnchor{}
 	var bindings []*runnerv1.WorkloadBinding
 	var role *rbacv1.ClusterRole
 	var roleBinding *rbacv1.ClusterRoleBinding
@@ -148,6 +153,21 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		if err != nil || len(services.Items) != 0 {
 			t.Errorf("unexpected Service; cleanup refused: %v", err)
 			return
+		}
+		anchors, err := admin.CoreV1().ConfigMaps(ns.Name).List(cleanup, metav1.ListOptions{})
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		for _, cm := range anchors.Items {
+			if pvcNamespaceCA(&cm) {
+				continue
+			}
+			expected := ownedAnchors[cm.Name]
+			if expected == nil || matchResourceAnchor(&cm, expected, ns.Name) != nil {
+				t.Error("unowned/replaced anchor; namespace cleanup refused")
+				return
+			}
 		}
 		if err := admin.CoreV1().Namespaces().Delete(cleanup, ns.Name, metav1.DeleteOptions{Preconditions: &metav1.Preconditions{UID: &ns.UID, ResourceVersion: &current.ResourceVersion}}); err != nil {
 			t.Error(err)
@@ -230,12 +250,20 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	if _, err := client.CoreV1().Secrets(ns.Name).List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
 		t.Fatal("runner can list Secrets")
 	}
+	if _, err := client.CoreV1().ConfigMaps(ns.Name).List(ctx, metav1.ListOptions{}); !apierrors.IsForbidden(err) {
+		t.Fatal("runner can list ConfigMaps")
+	}
+	if _, err := client.CoreV1().ConfigMaps("default").Get(ctx, "foreign-anchor", metav1.GetOptions{}); !apierrors.IsForbidden(err) {
+		t.Fatal("runner can read another namespace's anchor")
+	}
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	rpc := grpc.NewServer(grpc.UnaryInterceptor(func(ctx context.Context, req any, info *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
 		switch info.FullMethod {
+		case runnerv1.RunnerService_ReserveResourceAnchor_FullMethodName, runnerv1.RunnerService_PrepareAnchoredWorkload_FullMethodName, runnerv1.RunnerService_RemoveWorkloadAnchor_FullMethodName:
+			return handler(ctx, req)
 		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ObserveWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
 		default:
@@ -265,13 +293,8 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		req.Workload.Volumes[0].Labels[volumeKeyLabelKey] = name
 		return req
 	}
-	prepare := func(t *testing.T, req *runnerv1.PrepareWorkloadRequest) *runnerv1.WorkloadBinding {
+	recordBinding := func(t *testing.T, binding *runnerv1.WorkloadBinding) *runnerv1.WorkloadBinding {
 		t.Helper()
-		response, err := runner.PrepareWorkload(ctx, req)
-		if err != nil {
-			t.Fatal(err)
-		}
-		binding := response.Binding
 		bindings = append(bindings, binding)
 		ownedPods[podNameFromID(binding.WorkloadId)] = types.UID(binding.InstanceUid)
 		for _, claim := range binding.Volumes {
@@ -288,6 +311,14 @@ func TestLivePreparedWorkloads(t *testing.T) {
 			}
 		}
 		return binding
+	}
+	prepare := func(t *testing.T, req *runnerv1.PrepareWorkloadRequest) *runnerv1.WorkloadBinding {
+		t.Helper()
+		response, err := runner.PrepareWorkload(ctx, req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return recordBinding(t, response.Binding)
 	}
 	activate := func(t *testing.T, binding *runnerv1.WorkloadBinding) {
 		t.Helper()
@@ -604,4 +635,270 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		}
 		t.Log("held Secret CREATE completed after exact owner deletion; no Pod recreated; late credentials garbage-collected")
 	})
+	reserveAnchor := func(t *testing.T, intent *runnerv1.ResourceAnchor) *runnerv1.ResourceAnchor {
+		t.Helper()
+		response, err := runner.ReserveResourceAnchor(ctx, &runnerv1.ReserveResourceAnchorRequest{Intent: intent})
+		if err != nil || !validPreparedID(response.GetAnchor().GetInstanceUid()) {
+			t.Fatalf("live anchor reservation failed: %v", err)
+		}
+		ownedAnchors[resourceAnchorName(response.Anchor)] = response.Anchor
+		return response.Anchor
+	}
+	anchoredRequest := func(t *testing.T, sandbox, zero bool, program string) *runnerv1.PrepareAnchoredWorkloadRequest {
+		t.Helper()
+		intent := anchorTestIntent(runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_WORKLOAD, sandbox)
+		intent.BackendId = backend
+		p := request("anchor-"+uuid.NewString(), program, nil)
+		p.Workload.WorkloadId, p.Workload.Labels = intent.ResourceId, maps.Clone(intent.IdentityLabels)
+		delete(p.Workload.Labels, managedByLabelKey)
+		delete(p.Workload.Labels, workloadManagedByLabelKey)
+		p.Workload.Labels[ownerLabel] = run
+		req := &runnerv1.PrepareAnchoredWorkloadRequest{Preparation: p, WorkloadAnchor: reserveAnchor(t, intent)}
+		if zero {
+			p.Workload.Volumes, p.Workload.Main.Mounts = nil, nil
+		} else {
+			volume := &runnerv1.ResourceAnchor{Kind: runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_VOLUME, ResourceId: uuid.NewString(), BackendId: backend, IdentityLabels: volumeIdentityLabels(intent.IdentityLabels)}
+			volume.IdentityLabels[volumeKeyLabelKey] = volume.ResourceId
+			p.Workload.Volumes[0].Labels[volumeKeyLabelKey] = volume.ResourceId
+			req.VolumeAnchors = []*runnerv1.ResourceAnchor{reserveAnchor(t, volume)}
+		}
+		return req
+	}
+	prepareAnchored := func(t *testing.T, req *runnerv1.PrepareAnchoredWorkloadRequest) *runnerv1.WorkloadBinding {
+		t.Helper()
+		response, err := runner.PrepareAnchoredWorkload(ctx, req)
+		if err != nil || !proto.Equal(response.GetBinding().GetAnchor(), req.WorkloadAnchor) {
+			t.Fatalf("live anchored preparation failed: %v", err)
+		}
+		return recordBinding(t, response.Binding)
+	}
+	revokeAnchor := func(t *testing.T, anchor *runnerv1.ResourceAnchor) {
+		t.Helper()
+		if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 20*time.Second, true, func(ctx context.Context) (bool, error) {
+			response, err := runner.RemoveWorkloadAnchor(ctx, &runnerv1.RemoveWorkloadAnchorRequest{Expected: anchor})
+			if status.Code(err) == codes.Aborted {
+				return false, nil
+			}
+			if err != nil || !proto.Equal(response.GetAnchor(), anchor) {
+				return false, fmt.Errorf("anchor retirement identity unconfirmed: %v", err)
+			}
+			return response.State == runnerv1.ResourceAnchorRemovalState_RESOURCE_ANCHOR_REMOVAL_STATE_ABSENT, nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := admin.CoreV1().ConfigMaps(ns.Name).Get(ctx, resourceAnchorName(anchor), metav1.GetOptions{}); !apierrors.IsNotFound(err) {
+			t.Fatalf("independent anchor absence unconfirmed: %v", err)
+		}
+	}
+	freshWorkloadAnchor := func(t *testing.T, req *runnerv1.PrepareAnchoredWorkloadRequest) {
+		t.Helper()
+		intent := proto.Clone(req.WorkloadAnchor).(*runnerv1.ResourceAnchor)
+		intent.InstanceUid, intent.ResourceId = "", uuid.NewString()
+		req.WorkloadAnchor = reserveAnchor(t, intent)
+		req.Preparation.Workload.WorkloadId = intent.ResourceId
+	}
+	for _, sandbox := range []bool{false, true} {
+		t.Run("anchored-durable-resume-"+map[bool]string{false: "agent", true: "sandbox"}[sandbox], func(t *testing.T) {
+			req := anchoredRequest(t, sandbox, false, `require('fs').appendFileSync('/workspace/turns', 'first\n')`)
+			first := prepareAnchored(t, req)
+			activate(t, first)
+			waitSucceeded(t, first)
+			remove(t, first)
+			revokeAnchor(t, req.WorkloadAnchor)
+			freshWorkloadAnchor(t, req)
+			req.Preparation.ExpectedVolumes = first.Volumes
+			req.Preparation.Workload.Main.Cmd = []string{"-e", `const fs=require('fs'); if(fs.readFileSync('/workspace/turns','utf8')!=='first\n') process.exit(7); fs.appendFileSync('/workspace/turns','second\n'); if(fs.readFileSync('/workspace/turns','utf8')!=='first\nsecond\n') process.exit(8)`}
+			second := prepareAnchored(t, req)
+			if first.InstanceUid == second.InstanceUid || first.Anchor.InstanceUid == second.Anchor.InstanceUid || !proto.Equal(first.Volumes[0], second.Volumes[0]) {
+				t.Fatal("anchor replacement changed the retained workspace")
+			}
+			activate(t, second)
+			waitSucceeded(t, second)
+			remove(t, second)
+			revokeAnchor(t, req.WorkloadAnchor)
+			t.Log("two real turns; distinct workload anchors/Pods; same volume anchor/PVC; complete file contents preserved")
+		})
+	}
+	t.Run("anchor-revocation-wins-activation-CAS", func(t *testing.T) {
+		req := anchoredRequest(t, false, false, `process.exit(9)`)
+		binding := prepareAnchored(t, req)
+		var intercepted atomic.Bool
+		var patchStatus atomic.Int32
+		raceConfig := rest.CopyConfig(runnerConfig)
+		raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+			return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+				matched := request.Method == http.MethodPatch && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/configmaps/"+resourceAnchorName(req.WorkloadAnchor)
+				if matched && intercepted.CompareAndSwap(false, true) {
+					revokeAnchor(t, req.WorkloadAnchor)
+				}
+				response, err := next.RoundTrip(request)
+				if matched && err == nil {
+					patchStatus.Store(int32(response.StatusCode))
+				}
+				return response, err
+			})
+		})
+		raceClient, err := kubernetes.NewForConfig(raceConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := serverFor(raceClient).ActivateWorkload(ctx, &runnerv1.ActivateWorkloadRequest{Expected: binding}); err == nil || response != nil || !intercepted.Load() || patchStatus.Load() != http.StatusNotFound {
+			t.Fatalf("revoked anchor authorized activation: code=%s patch=%d", status.Code(err), patchStatus.Load())
+		}
+		remove(t, binding)
+		t.Log("anchor DELETE committed before activation claim; actual ConfigMap PATCH returned 404; exact Pod cleanup confirmed")
+	})
+	t.Run("anchor-activation-wins-stale-revocation-CAS", func(t *testing.T) {
+		req := anchoredRequest(t, true, true, `process.exit(0)`)
+		binding := prepareAnchored(t, req)
+		var intercepted atomic.Bool
+		var deleteStatus atomic.Int32
+		raceConfig := rest.CopyConfig(runnerConfig)
+		raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+			return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+				matched := request.Method == http.MethodDelete && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/configmaps/"+resourceAnchorName(req.WorkloadAnchor)
+				if matched && intercepted.CompareAndSwap(false, true) {
+					activate(t, binding)
+				}
+				response, err := next.RoundTrip(request)
+				if matched && err == nil {
+					deleteStatus.Store(int32(response.StatusCode))
+				}
+				return response, err
+			})
+		})
+		raceClient, err := kubernetes.NewForConfig(raceConfig)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if response, err := serverFor(raceClient).RemoveWorkloadAnchor(ctx, &runnerv1.RemoveWorkloadAnchorRequest{Expected: req.WorkloadAnchor}); err == nil || response != nil || !intercepted.Load() || deleteStatus.Load() != http.StatusConflict {
+			t.Fatalf("stale DELETE ignored committed activation: code=%s delete=%d", status.Code(err), deleteStatus.Load())
+		}
+		cm, err := admin.CoreV1().ConfigMaps(ns.Name).Get(ctx, resourceAnchorName(req.WorkloadAnchor), metav1.GetOptions{})
+		if err != nil || cm.Annotations[resourceAnchorActivationAnnotation] != binding.InstanceUid {
+			t.Fatal("activation claim disappeared")
+		}
+		if _, err := runner.RemoveWorkloadAnchor(ctx, &runnerv1.RemoveWorkloadAnchorRequest{Expected: req.WorkloadAnchor}); status.Code(err) != codes.FailedPrecondition {
+			t.Fatal("potentially executed Pod did not require exact removal")
+		}
+		waitSucceeded(t, binding)
+		remove(t, binding)
+		revokeAnchor(t, req.WorkloadAnchor)
+		t.Log("activation claim advanced actual ConfigMap revision; stale DELETE returned 409; exact Pod removal required before anchor retirement")
+	})
+	for _, scenario := range []string{"pods", "pods-replaced-anchor", "persistentvolumeclaims"} {
+		t.Run("late-"+scenario+"-create-after-anchor-revocation", func(t *testing.T) {
+			resource := scenario
+			if scenario == "pods-replaced-anchor" {
+				resource = "pods"
+			}
+			req := anchoredRequest(t, false, false, `process.exit(9)`)
+			var intercepted atomic.Bool
+			var committed *corev1.Pod
+			var volume *runnerv1.VolumeListItem
+			var replacement *runnerv1.ResourceAnchor
+			raceConfig := rest.CopyConfig(runnerConfig)
+			raceConfig.ContentType, raceConfig.AcceptContentTypes = "application/json", "application/json"
+			raceConfig.Wrap(func(next http.RoundTripper) http.RoundTripper {
+				return preparedSecretTransport(func(request *http.Request) (*http.Response, error) {
+					matched := request.Method == http.MethodPost && request.URL.Path == "/api/v1/namespaces/"+ns.Name+"/"+resource
+					if matched && intercepted.CompareAndSwap(false, true) {
+						revokeAnchor(t, req.WorkloadAnchor)
+						if scenario == "pods-replaced-anchor" {
+							intent := proto.Clone(req.WorkloadAnchor).(*runnerv1.ResourceAnchor)
+							intent.InstanceUid = ""
+							replacement = reserveAnchor(t, intent)
+							if replacement.InstanceUid == req.WorkloadAnchor.InstanceUid {
+								t.Fatal("fixture did not replace the anchor UID")
+							}
+						}
+					}
+					response, err := next.RoundTrip(request)
+					if !matched || err != nil || response.StatusCode != http.StatusCreated {
+						return response, err
+					}
+					data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+					_ = response.Body.Close()
+					response.Body = io.NopCloser(bytes.NewReader(data))
+					if err != nil || len(data) >= 1<<20 {
+						t.Fatal("late create response unreadable or too large")
+					}
+					if resource == "pods" {
+						committed = &corev1.Pod{}
+						if err := json.Unmarshal(data, committed); err != nil || matchAnchoredMetadata(committed.ObjectMeta, req.WorkloadAnchor) != nil || !hasPreparedGate(committed) || committed.Spec.NodeName != "" || committed.Labels[ownerLabel] != run {
+							t.Fatalf("late Pod lacked revoked UID ownership or execution gate: %v", err)
+						}
+						binding := preparedBindingFromPod(t, committed)
+						if err := server.matchPreparedPod(committed, binding); err != nil || len(binding.Volumes) != 1 {
+							t.Fatalf("late Pod binding invalid: %v", err)
+						}
+						ownedPods[committed.Name] = committed.UID
+						bindings = append(bindings, binding)
+						volume = binding.Volumes[0]
+					} else {
+						claim := &corev1.PersistentVolumeClaim{}
+						if err := json.Unmarshal(data, claim); err != nil || matchAnchoredMetadata(claim.ObjectMeta, req.VolumeAnchors[0]) != nil || claim.Labels[ownerLabel] != run {
+							t.Fatalf("late PVC lacked persistent anchor: %v", err)
+						}
+						volume, err = preparedVolume(claim, backend)
+						if err != nil {
+							t.Fatal(err)
+						}
+					}
+					ownedClaims[volume.InstanceId] = types.UID(volume.InstanceUid)
+					return response, nil
+				})
+			})
+			raceClient, err := kubernetes.NewForConfig(raceConfig)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if response, err := serverFor(raceClient).PrepareAnchoredWorkload(ctx, req); err == nil || response != nil || !intercepted.Load() || volume == nil {
+				t.Fatalf("late creation was not committed and rejected: %v", err)
+			}
+			// Observe natural GC before invoking any exact Pod cleanup. The deleted
+			// anchor alone is not evidence that its delayed child is absent.
+			if err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+				pod, err := admin.CoreV1().Pods(ns.Name).Get(ctx, podNameFromID(req.Preparation.Workload.WorkloadId), metav1.GetOptions{})
+				if apierrors.IsNotFound(err) {
+					return true, nil
+				}
+				if err == nil && (committed == nil || pod.UID != committed.UID || !hasPreparedGate(pod) || pod.Spec.NodeName != "" || len(pod.Status.ContainerStatuses) != 0 || len(pod.Status.InitContainerStatuses) != 0) {
+					return false, fmt.Errorf("late Pod replaced or executed")
+				}
+				return false, err
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if committed != nil {
+				waitSecretsAbsent(t, parseSecretAnnotation(committed.Annotations))
+			}
+			if replacement != nil {
+				if err := server.requireResourceAnchor(ctx, replacement); err != nil {
+					t.Fatal("GC changed the new same-name owner")
+				}
+				revokeAnchor(t, replacement)
+			}
+			claim, err := admin.CoreV1().PersistentVolumeClaims(ns.Name).Get(ctx, volume.InstanceId, metav1.GetOptions{})
+			if err != nil || matchPreparedPVC(claim, volume, ns.Name) != nil || claim.DeletionTimestamp != nil {
+				t.Fatal("workload-anchor removal lost the durable workspace")
+			}
+			freshWorkloadAnchor(t, req)
+			req.Preparation.ExpectedVolumes = []*runnerv1.VolumeListItem{volume}
+			req.Preparation.Workload.Main.Cmd = []string{"-e", `require('fs').writeFileSync('/workspace/recovered', 'ok')`}
+			binding := prepareAnchored(t, req)
+			if !proto.Equal(binding.Volumes[0], volume) {
+				t.Fatal("recovery substituted persistent volume identity")
+			}
+			activate(t, binding)
+			waitSucceeded(t, binding)
+			remove(t, binding)
+			revokeAnchor(t, req.WorkloadAnchor)
+			if committed != nil {
+				t.Logf("actual late Pod CREATE committed after workload-anchor deletion; natural GC of gated Pod observed; replacement-owner case=%t; exact PVC reused", replacement != nil)
+			} else {
+				t.Log("actual late PVC CREATE committed after workload-anchor deletion; no old Pod created; exact retained PVC reused successfully")
+			}
+		})
+	}
 }

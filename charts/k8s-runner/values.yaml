@@ -47,6 +47,9 @@ rbac:
       resources: ["secrets"]
       verbs: ["get", "create", "delete", "patch"]
     - apiGroups: [""]
+      resources: ["configmaps"]
+      verbs: ["get", "create", "patch", "delete"]
+    - apiGroups: [""]
       resources: ["events"]
       verbs: ["get", "list", "watch"]
 

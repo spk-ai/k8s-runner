@@ -32,6 +32,7 @@ const (
 type workloadPreparation struct {
 	binding  *runnerv1.WorkloadBinding
 	expected map[string]*runnerv1.VolumeListItem
+	anchors  map[string]*runnerv1.ResourceAnchor
 }
 
 func validPreparedID(value string) bool {
@@ -57,32 +58,44 @@ func canonicalBinding(value *runnerv1.WorkloadBinding) (*runnerv1.WorkloadBindin
 		}
 		seenNames[volume.InstanceId], seenKeys[volume.VolumeKey] = true, true
 	}
+	if err := validateBindingAnchors(value); err != nil {
+		return nil, err
+	}
 	result := proto.Clone(value).(*runnerv1.WorkloadBinding)
 	slices.SortFunc(result.Volumes, func(a, b *runnerv1.VolumeListItem) int { return strings.Compare(a.InstanceId, b.InstanceId) })
 	return result, nil
 }
 
-func preparedVolume(pvc *corev1.PersistentVolumeClaim, backend string) *runnerv1.VolumeListItem {
+func preparedVolume(pvc *corev1.PersistentVolumeClaim, backend string) (*runnerv1.VolumeListItem, error) {
+	anchor, err := volumeAnchorFromPVC(pvc, backend)
+	if err != nil {
+		return nil, err
+	}
 	return &runnerv1.VolumeListItem{
 		InstanceId: pvc.Name, InstanceUid: string(pvc.UID), BackendId: backend,
 		VolumeKey: pvc.Labels[volumeKeyLabelKey], IdentityLabels: volumeIdentityLabels(pvc.Labels),
-	}
+		Anchor: anchor,
+	}, nil
 }
 
 func matchPreparedPVC(pvc *corev1.PersistentVolumeClaim, expected *runnerv1.VolumeListItem, namespace string) error {
 	if pvc == nil || pvc.Name != expected.InstanceId || pvc.Namespace != namespace || string(pvc.UID) != expected.InstanceUid ||
-		pvc.ResourceVersion == "" || len(pvc.OwnerReferences) != 0 || !maps.Equal(volumeIdentityLabels(pvc.Labels), expected.IdentityLabels) {
+		pvc.ResourceVersion == "" || !maps.Equal(volumeIdentityLabels(pvc.Labels), expected.IdentityLabels) {
 		return status.Error(codes.FailedPrecondition, "prepared_volume_identity_mismatch")
 	}
-	return nil
+	return matchAnchoredMetadata(pvc.ObjectMeta, expected.Anchor)
 }
 
 func (s *Server) PrepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkloadRequest) (*runnerv1.PrepareWorkloadResponse, error) {
+	return s.prepareWorkload(ctx, req, nil, nil)
+}
+
+func (s *Server) prepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkloadRequest, anchor *runnerv1.ResourceAnchor, anchors map[string]*runnerv1.ResourceAnchor) (*runnerv1.PrepareWorkloadResponse, error) {
 	workload := req.GetWorkload()
 	if workload == nil || !validPreparedID(workload.WorkloadId) || !validPreparedBackend(req.GetBackendId()) || len(workload.Volumes) > maxPreparedVolumes {
 		return nil, status.Error(codes.InvalidArgument, "valid_workload_preparation_required")
 	}
-	p := &workloadPreparation{binding: &runnerv1.WorkloadBinding{WorkloadId: workload.WorkloadId, BackendId: req.BackendId}, expected: map[string]*runnerv1.VolumeListItem{}}
+	p := &workloadPreparation{binding: &runnerv1.WorkloadBinding{WorkloadId: workload.WorkloadId, BackendId: req.BackendId, Anchor: anchor}, expected: map[string]*runnerv1.VolumeListItem{}, anchors: anchors}
 	labels, err := buildLabels(workload.WorkloadId, workload.AdditionalProperties, workload.Labels)
 	if err != nil {
 		return nil, status.Error(codes.InvalidArgument, "invalid_prepared_workload_labels")
@@ -106,7 +119,7 @@ func (s *Server) PrepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkl
 			return nil, err
 		}
 		pvc := desired[expected.InstanceId]
-		if pvc == nil || expected.BackendId != req.BackendId || p.expected[expected.InstanceId] != nil || !maps.Equal(volumeIdentityLabels(pvc.Labels), expected.IdentityLabels) {
+		if pvc == nil || expected.BackendId != req.BackendId || p.expected[expected.InstanceId] != nil || !maps.Equal(volumeIdentityLabels(pvc.Labels), expected.IdentityLabels) || !proto.Equal(expected.Anchor, anchors[expected.VolumeKey]) {
 			return nil, status.Error(codes.InvalidArgument, "preparation_volume_contract_mismatch")
 		}
 		p.expected[expected.InstanceId] = proto.Clone(expected).(*runnerv1.VolumeListItem)
@@ -134,7 +147,7 @@ func (s *Server) PrepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkl
 		if err := matchPreparedPVC(pvc, expected, s.namespace); err != nil {
 			return nil, err
 		}
-		if err := validatePVCReuse(pvc, desired[name]); err != nil {
+		if err := p.validatePVC(pvc, desired[name]); err != nil {
 			return nil, err
 		}
 	}
@@ -150,8 +163,20 @@ func (p *workloadPreparation) resolvePVC(ctx context.Context, s *Server, spec *r
 	if err != nil {
 		return "", err
 	}
+	anchor := p.anchors[desired.Labels[volumeKeyLabelKey]]
+	if p.binding.Anchor != nil {
+		if err := s.requireResourceAnchor(ctx, p.binding.Anchor); err != nil {
+			return "", err
+		}
+		if err := s.requireResourceAnchor(ctx, anchor); err != nil {
+			return "", err
+		}
+		if err := attachResourceAnchor(&desired.ObjectMeta, anchor); err != nil {
+			return "", err
+		}
+	}
 	if p.expected[desired.Name] == nil {
-		if _, err := s.ensurePVC(ctx, spec, labels); err != nil {
+		if _, err := s.ensurePVCObject(ctx, desired, anchor); err != nil {
 			return "", err
 		}
 	}
@@ -159,10 +184,13 @@ func (p *workloadPreparation) resolvePVC(ctx context.Context, s *Server, spec *r
 	if err != nil {
 		return "", grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
-	if err := validatePVCReuse(pvc, desired); err != nil {
+	if err := p.validatePVC(pvc, desired); err != nil {
 		return "", err
 	}
-	actual := preparedVolume(pvc, p.binding.BackendId)
+	actual, err := preparedVolume(pvc, p.binding.BackendId)
+	if err != nil {
+		return "", err
+	}
 	if err := validateVolumeRemovalTarget(actual); err != nil {
 		return "", status.Error(codes.FailedPrecondition, "prepared_volume_identity_missing")
 	}
@@ -176,6 +204,14 @@ func (p *workloadPreparation) resolvePVC(ctx context.Context, s *Server, spec *r
 func (p *workloadPreparation) gate(ctx context.Context, s *Server, pod *corev1.Pod) error {
 	if _, err := s.checkVolumeBackend(ctx, p.binding.BackendId); err != nil {
 		return err
+	}
+	if err := s.requireBindingAnchors(ctx, p.binding); err != nil {
+		return err
+	}
+	if p.binding.Anchor != nil {
+		if err := attachResourceAnchor(&pod.ObjectMeta, p.binding.Anchor); err != nil {
+			return err
+		}
 	}
 	data, err := protojson.Marshal(p.binding)
 	if err != nil || len(data) > 64*1024 {
@@ -206,11 +242,20 @@ func (p *workloadPreparation) accept(ctx context.Context, s *Server, pod *corev1
 	if _, err := s.checkVolumeBackend(ctx, binding.BackendId); err != nil {
 		return err
 	}
+	if err := s.requireBindingAnchors(ctx, binding); err != nil {
+		return err
+	}
+	if err := s.claimAnchorPod(ctx, binding, false); err != nil {
+		return err
+	}
 	p.binding = binding
 	return nil
 }
 
 func (p *workloadPreparation) complete(ctx context.Context, s *Server) error {
+	if err := s.requireBindingAnchors(ctx, p.binding); err != nil {
+		return err
+	}
 	pods := s.clientset.CoreV1().Pods(s.namespace)
 	pod, err := pods.Get(ctx, podNameFromID(p.binding.WorkloadId), metav1.GetOptions{})
 	if err != nil {
@@ -247,8 +292,11 @@ func hasPreparedGate(pod *corev1.Pod) bool {
 
 func (s *Server) matchPreparedPod(pod *corev1.Pod, expected *runnerv1.WorkloadBinding) error {
 	if pod == nil || pod.Name != podNameFromID(expected.WorkloadId) || pod.Namespace != s.namespace || string(pod.UID) != expected.InstanceUid ||
-		pod.ResourceVersion == "" || len(pod.OwnerReferences) != 0 || pod.Labels[managedByLabelKey] != managedByLabelValue || pod.Labels[workloadIDLabelKey] != expected.WorkloadId {
+		pod.ResourceVersion == "" || pod.Labels[managedByLabelKey] != managedByLabelValue || pod.Labels[workloadIDLabelKey] != expected.WorkloadId {
 		return status.Error(codes.FailedPrecondition, "prepared_workload_identity_mismatch")
+	}
+	if err := matchAnchoredMetadata(pod.ObjectMeta, expected.Anchor); err != nil {
+		return err
 	}
 	stored := &runnerv1.WorkloadBinding{}
 	if err := protojson.Unmarshal([]byte(pod.Annotations[preparedBindingAnnotation]), stored); err != nil || stored.InstanceUid != "" {
@@ -301,6 +349,9 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 	if err != nil {
 		return nil, err
 	}
+	if err := s.requireBindingAnchors(ctx, expected); err != nil {
+		return nil, err
+	}
 	if _, err := s.checkVolumeBackend(ctx, expected.BackendId); err != nil {
 		return nil, err
 	}
@@ -315,6 +366,9 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 	active := pod.Annotations[preparedStateAnnotation] == "active"
 	if pod.DeletionTimestamp != nil || active && hasPreparedGate(pod) || !active && (pod.Annotations[preparedStateAnnotation] != "prepared" || !hasPreparedGate(pod) || pod.Spec.NodeName != "") {
 		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_not_activatable")
+	}
+	if err := s.claimAnchorPod(ctx, expected, true); err != nil {
+		return nil, err
 	}
 	hold := preparedHoldPrefix + expected.InstanceUid
 	claims := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace)
@@ -355,6 +409,9 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 		return nil, err
 	}
 	if !active {
+		if err := s.requireBindingAnchors(ctx, expected); err != nil {
+			return nil, err
+		}
 		gates := slices.DeleteFunc(slices.Clone(pod.Spec.SchedulingGates), func(gate corev1.PodSchedulingGate) bool { return gate.Name == preparedGate })
 		if gates == nil {
 			gates = []corev1.PodSchedulingGate{}
