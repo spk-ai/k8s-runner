@@ -183,6 +183,7 @@ func (p *workloadPreparation) gate(ctx context.Context, s *Server, pod *corev1.P
 	}
 	pod.Annotations[preparedBindingAnnotation] = string(data)
 	pod.Annotations[preparedStateAnnotation] = "preparing"
+	pod.Annotations[preparationRecoveryAnnotation] = preparationRecoveryVersion
 	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: preparedGate}}
 	return nil
 }
