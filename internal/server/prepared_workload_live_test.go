@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"slices"
 	"strings"
@@ -89,6 +90,7 @@ func TestLivePreparedWorkloads(t *testing.T) {
 	ownedPods, ownedClaims := map[string]types.UID{}, map[string]types.UID{}
 	ownedAnchors := map[string]*runnerv1.ResourceAnchor{}
 	ownedRevocations := map[string]*runnerv1.PreparationRevocation{}
+	ownedAdoptions := map[string]*runnerv1.VolumeAnchorAdoption{}
 	var bindings []*runnerv1.WorkloadBinding
 	var role *rbacv1.ClusterRole
 	var roleBinding *rbacv1.ClusterRoleBinding
@@ -168,6 +170,14 @@ func TestLivePreparedWorkloads(t *testing.T) {
 				actual, err := server.readPreparationRevocation(cleanup, expected)
 				if err != nil || !proto.Equal(actual, expected) || string(cm.UID) != expected.InstanceUid {
 					t.Error("revocation record identity changed; namespace cleanup refused")
+					return
+				}
+				continue
+			}
+			if expected := ownedAdoptions[cm.Name]; expected != nil {
+				actual, err := readAdoptionJournal(&cm, ns.Name)
+				if err != nil || !proto.Equal(actual, expected) {
+					t.Error("adoption journal changed; namespace cleanup refused")
 					return
 				}
 				continue
@@ -274,6 +284,9 @@ func TestLivePreparedWorkloads(t *testing.T) {
 		case runnerv1.RunnerService_ReserveResourceAnchor_FullMethodName, runnerv1.RunnerService_PrepareAnchoredWorkload_FullMethodName, runnerv1.RunnerService_RemoveWorkloadAnchor_FullMethodName, runnerv1.RunnerService_RemoveVolumeAnchored_FullMethodName:
 			return handler(ctx, req)
 		case runnerv1.RunnerService_RevokeWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ObservePreparationRevocation_FullMethodName:
+			return handler(ctx, req)
+		case runnerv1.RunnerService_ReserveVolumeAnchorAdoption_FullMethodName, runnerv1.RunnerService_ApplyVolumeAnchorAdoption_FullMethodName,
+			runnerv1.RunnerService_ObserveVolumeAnchorAdoption_FullMethodName, runnerv1.RunnerService_FinalizeVolumeAnchorAdoption_FullMethodName:
 			return handler(ctx, req)
 		case runnerv1.RunnerService_PrepareWorkload_FullMethodName, runnerv1.RunnerService_ObserveWorkloadPreparation_FullMethodName, runnerv1.RunnerService_ActivateWorkload_FullMethodName, runnerv1.RunnerService_InspectPreparedWorkload_FullMethodName, runnerv1.RunnerService_RemovePreparedWorkload_FullMethodName, runnerv1.RunnerService_RemoveVolumeBound_FullMethodName:
 			return handler(ctx, req)
@@ -1232,5 +1245,175 @@ func TestLivePreparedWorkloads(t *testing.T) {
 				t.Log("actual late PVC CREATE committed after workload-anchor deletion; no old Pod created; exact retained PVC reused successfully")
 			}
 		})
+	}
+	for _, sandbox := range []bool{false, true} {
+		for _, stage := range []string{"normal", "adoption-owner-reply", "adoption-journal-reply", "adoption-pin-reply", "adoption-apply-reply", "adoption-final-owner-reply", "adoption-final-pvc-reply", "owner-GC"} {
+			t.Run("volume-adoption-"+stage+map[bool]string{false: "-agent", true: "-sandbox"}[sandbox], func(t *testing.T) {
+				claims, objects := admin.CoreV1().PersistentVolumeClaims(ns.Name), admin.CoreV1().ConfigMaps(ns.Name)
+				intent := anchorTestIntent(runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_VOLUME, sandbox)
+				intent.BackendId = backend
+				marker := uuid.NewString()
+				req := request("adopt-"+uuid.NewString(), `require('fs').writeFileSync('/workspace/adoption-proof', '`+marker+`')`, nil)
+				req.Workload.Labels = maps.Clone(intent.IdentityLabels)
+				delete(req.Workload.Labels, managedByLabelKey)
+				delete(req.Workload.Labels, workloadManagedByLabelKey)
+				delete(req.Workload.Labels, volumeKeyLabelKey)
+				req.Workload.Labels[ownerLabel] = run
+				req.Workload.Volumes[0].Labels[volumeKeyLabelKey] = intent.ResourceId
+				first := prepare(t, req)
+				activate(t, first)
+				waitSucceeded(t, first)
+				remove(t, first)
+				// This original binding has already been explicitly removed. Cleanup
+				// must not later use its unanchored receipt against migrated storage.
+				bindings = slices.DeleteFunc(bindings, func(b *runnerv1.WorkloadBinding) bool { return b.InstanceUid == first.InstanceUid })
+				original, err := claims.Get(ctx, first.Volumes[0].InstanceId, metav1.GetOptions{})
+				if err != nil || original.Status.Phase != corev1.ClaimBound || original.Spec.VolumeName == "" {
+					t.Fatalf("original bound storage missing: %v", err)
+				}
+				reservation := &runnerv1.ReserveVolumeAnchorAdoptionRequest{Id: uuid.NewString(), Expected: first.Volumes[0], Intent: intent}
+				var a *runnerv1.VolumeAnchorAdoption
+				reserve := func() {
+					response, err := runner.ReserveVolumeAnchorAdoption(ctx, reservation)
+					if err != nil || validateVolumeAdoption(response.GetAdoption(), true) != nil {
+						t.Fatalf("native adoption reservation: %v", err)
+					}
+					if a != nil && !proto.Equal(a, response.Adoption) {
+						t.Fatal("native retry changed adoption identities")
+					}
+					a = response.Adoption
+					ownedAdoptions[adoptionJournalName(a.Previous)] = a
+					ownedAnchors[resourceAnchorName(a.Anchor)] = a.Anchor
+				}
+				apply := func() {
+					response, err := runner.ApplyVolumeAnchorAdoption(ctx, &runnerv1.ApplyVolumeAnchorAdoptionRequest{Adoption: a})
+					if err != nil || !proto.Equal(response.GetAdoption(), a) || response.Volume.InstanceUid != string(original.UID) || !proto.Equal(response.Volume.Anchor, a.Anchor) {
+						t.Fatalf("native apply did not retain PVC identity: %v", err)
+					}
+				}
+				if stage != "adoption-owner-reply" && stage != "adoption-journal-reply" && stage != "adoption-pin-reply" {
+					reserve()
+				}
+				if strings.HasPrefix(stage, "adoption-final-") {
+					apply()
+				}
+				if strings.HasPrefix(stage, "adoption-") {
+					var operation proto.Message = reservation
+					if stage == "adoption-apply-reply" {
+						operation = &runnerv1.ApplyVolumeAnchorAdoptionRequest{Adoption: a}
+					}
+					if strings.HasPrefix(stage, "adoption-final-") {
+						operation = &runnerv1.FinalizeVolumeAnchorAdoptionRequest{Adoption: a}
+					}
+					data, err := protojson.Marshal(operation)
+					if err != nil {
+						t.Fatal(err)
+					}
+					killPreparedSecretProcess(t, preparedSecretCrashSpec{Kubeconfig: kubeconfig, Namespace: ns.Name, Account: account.Name, Stage: stage, Adoption: data})
+					owner, err := objects.Get(ctx, resourceAnchorName(intent), metav1.GetOptions{})
+					if err != nil {
+						t.Fatal(err)
+					}
+					journal, journalErr := objects.Get(ctx, adoptionJournalName(first.Volumes[0]), metav1.GetOptions{})
+					if stage == "adoption-owner-reply" && !apierrors.IsNotFound(journalErr) || stage != "adoption-owner-reply" && journalErr != nil {
+						t.Fatalf("unexpected journal at native crash boundary: %v", journalErr)
+					}
+					reserve()
+					if string(owner.UID) != a.Anchor.InstanceUid || journalErr == nil && string(journal.UID) != a.InstanceUid {
+						t.Fatal("native SIGKILL recovery replaced owner/journal")
+					}
+				}
+				reserve()
+				apply()
+				current, err := claims.Get(ctx, original.Name, metav1.GetOptions{})
+				if err != nil || current.UID != original.UID || !reflect.DeepEqual(current.Spec, original.Spec) {
+					t.Fatal("adoption changed physical storage specification")
+				}
+				if stage != "adoption-final-pvc-reply" && validatePVCReuseSpec(current, original) == nil {
+					t.Fatal("unfinished adoption allowed reuse")
+				}
+				if stage == "owner-GC" {
+					owner, err := objects.Get(ctx, resourceAnchorName(a.Anchor), metav1.GetOptions{})
+					if err != nil || string(owner.UID) != a.Anchor.InstanceUid {
+						t.Fatal("fixture owner changed before GC")
+					}
+					background := metav1.DeletePropagationBackground
+					if err := objects.Delete(ctx, owner.Name, metav1.DeleteOptions{PropagationPolicy: &background, Preconditions: &metav1.Preconditions{UID: &owner.UID, ResourceVersion: &owner.ResourceVersion}}); err != nil {
+						t.Fatal(err)
+					}
+					if err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+						current, err = claims.Get(ctx, original.Name, metav1.GetOptions{})
+						if err != nil || current.UID != original.UID || !reflect.DeepEqual(current.Spec, original.Spec) || !slices.Contains(current.Finalizers, volumeAdoptionHoldPrefix+a.Id) {
+							return false, fmt.Errorf("GC lost held original PVC: %v", err)
+						}
+						return current.DeletionTimestamp != nil && !slices.Contains(current.Finalizers, "kubernetes.io/pvc-protection"), nil
+					}); err != nil {
+						t.Fatal(err)
+					}
+					pv, err := admin.CoreV1().PersistentVolumes().Get(ctx, original.Spec.VolumeName, metav1.GetOptions{})
+					if err != nil || pv.Spec.ClaimRef == nil || pv.Spec.ClaimRef.UID != original.UID || pv.DeletionTimestamp != nil {
+						t.Fatal("held workspace lost its backing volume")
+					}
+					if _, err := runner.ObserveVolumeAnchorAdoption(ctx, &runnerv1.ObserveVolumeAnchorAdoptionRequest{Adoption: a}); err == nil {
+						t.Fatal("missing owner reported valid adoption")
+					}
+					if _, err := runner.FinalizeVolumeAnchorAdoption(ctx, &runnerv1.FinalizeVolumeAnchorAdoptionRequest{Adoption: a}); err == nil {
+						t.Fatal("missing owner authorized finalization")
+					}
+					if _, err := runner.ReserveVolumeAnchorAdoption(ctx, reservation); err == nil {
+						t.Fatal("missing owner was recreated")
+					}
+					current, err = claims.Get(ctx, original.Name, metav1.GetOptions{})
+					if err != nil || current.UID != original.UID || current.Labels[ownerLabel] != run || !reflect.DeepEqual(current.Spec, original.Spec) || !slices.Equal(current.Finalizers, []string{volumeAdoptionHoldPrefix + a.Id}) {
+						t.Fatal("fixture hold cleanup target is not exclusively owned")
+					}
+					// Explicit disposal of this test-created claim only, after proving
+					// native recovery retains it. Never remove pre-existing finalizers.
+					if _, err := claims.Patch(ctx, current.Name, types.JSONPatchType, preparedObjectPatch(current.ObjectMeta, preparedPatchOperation{"add", "/metadata/finalizers", []string{}}), metav1.PatchOptions{}); err != nil {
+						t.Fatal(err)
+					}
+					if err := wait.PollUntilContextTimeout(ctx, 200*time.Millisecond, 30*time.Second, true, func(ctx context.Context) (bool, error) {
+						_, err := claims.Get(ctx, original.Name, metav1.GetOptions{})
+						if apierrors.IsNotFound(err) {
+							return true, nil
+						}
+						return false, err
+					}); err != nil {
+						t.Fatal(err)
+					}
+					t.Log("owner GC requested PVC deletion; original bound PVC/PV retained by exact adoption hold; native recovery refused; owned fixture explicitly disposed")
+					return
+				}
+				finalized, err := runner.FinalizeVolumeAnchorAdoption(ctx, &runnerv1.FinalizeVolumeAnchorAdoptionRequest{Adoption: a})
+				if err != nil || finalized.GetState() != runnerv1.VolumeAnchorAdoptionState_VOLUME_ANCHOR_ADOPTION_STATE_READY || !proto.Equal(finalized.GetAdoption(), a) {
+					t.Fatalf("native finalization failed: %v", err)
+				}
+				follow := proto.Clone(req).(*runnerv1.PrepareWorkloadRequest)
+				follow.ExpectedVolumes = []*runnerv1.VolumeListItem{finalized.Volume}
+				follow.Workload.Main.Cmd = []string{"-e", `if(require('fs').readFileSync('/workspace/adoption-proof','utf8')!=='` + marker + `') process.exit(7)`}
+				workIntent := proto.Clone(a.Anchor).(*runnerv1.ResourceAnchor)
+				workIntent.Kind, workIntent.ResourceId, workIntent.InstanceUid = runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_WORKLOAD, uuid.NewString(), ""
+				delete(workIntent.IdentityLabels, volumeKeyLabelKey)
+				if !sandbox {
+					workIntent.IdentityLabels["thread-id"] = uuid.NewString()
+					follow.Workload.Labels["thread-id"] = workIntent.IdentityLabels["thread-id"]
+				}
+				follow.Workload.WorkloadId = workIntent.ResourceId
+				workAnchor := reserveAnchor(t, workIntent)
+				second := prepareAnchored(t, &runnerv1.PrepareAnchoredWorkloadRequest{Preparation: follow, WorkloadAnchor: workAnchor, VolumeAnchors: []*runnerv1.ResourceAnchor{a.Anchor}})
+				if second.InstanceUid == first.InstanceUid || !proto.Equal(second.Volumes[0], finalized.Volume) {
+					t.Fatal("adopted follow-up changed durable binding")
+				}
+				activate(t, second)
+				waitSucceeded(t, second)
+				remove(t, second)
+				revokeAnchor(t, workAnchor)
+				current, err = claims.Get(ctx, original.Name, metav1.GetOptions{})
+				if err != nil || current.UID != original.UID || !reflect.DeepEqual(current.Spec, original.Spec) || !slices.Equal(current.Finalizers, original.Finalizers) {
+					t.Fatal("post-adoption compute release changed original storage")
+				}
+				t.Logf("checkpoint=%s; original PVC uid=%s spec and file preserved; distinct native Pod read original file and released compute", stage, original.UID)
+			})
+		}
 	}
 }

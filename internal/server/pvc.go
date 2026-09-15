@@ -1,6 +1,8 @@
 package server
 
 import (
+	"strings"
+
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	corev1 "k8s.io/api/core/v1"
@@ -26,6 +28,17 @@ func validatePVCReuseSpec(existing, desired *corev1.PersistentVolumeClaim) error
 	}
 	if existing.DeletionTimestamp != nil || existing.Status.Phase == corev1.ClaimLost {
 		return status.Errorf(codes.FailedPrecondition, "pvc_not_reusable: %s", existing.Name)
+	}
+	state, journal := existing.Annotations[volumeAdoptionStateAnnotation], existing.Annotations[volumeAdoptionJournalAnnotation]
+	if state != "" || journal != "" {
+		if state != "ready" || !validPreparedID(journal) || len(existing.OwnerReferences) != 1 || existing.Annotations[resourceAnchorAnnotation] == "" {
+			return status.Error(codes.FailedPrecondition, "pvc_anchor_adoption_incomplete")
+		}
+	}
+	for _, finalizer := range existing.Finalizers {
+		if strings.HasPrefix(finalizer, volumeAdoptionHoldPrefix) {
+			return status.Error(codes.FailedPrecondition, "pvc_anchor_adoption_incomplete")
+		}
 	}
 	for _, key := range pvcIdentityLabelKeys {
 		actual, present := existing.Labels[key]
