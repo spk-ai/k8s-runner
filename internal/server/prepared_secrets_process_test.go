@@ -29,7 +29,30 @@ type preparedSecretCrashSpec struct {
 	Namespace  string          `json:"namespace"`
 	Account    string          `json:"account"`
 	Stage      string          `json:"stage"`
-	Request    json.RawMessage `json:"request"`
+	Request    json.RawMessage `json:"request,omitempty"`
+	Revocation json.RawMessage `json:"revocation,omitempty"`
+}
+
+func TestPreparedCrashSpecSeparatesOperations(t *testing.T) {
+	for _, revoking := range []bool{false, true} {
+		spec := preparedSecretCrashSpec{}
+		if revoking {
+			spec.Revocation = json.RawMessage(`{"workloadAnchor":{}}`)
+		} else {
+			spec.Request = json.RawMessage(`{"workload":{}}`)
+		}
+		data, err := json.Marshal(spec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var decoded preparedSecretCrashSpec
+		if err := json.Unmarshal(data, &decoded); err != nil {
+			t.Fatal(err)
+		}
+		if revoking && (len(decoded.Request) != 0 || len(decoded.Revocation) == 0) || !revoking && (len(decoded.Request) == 0 || len(decoded.Revocation) != 0) {
+			t.Fatal("unused operation serialized as a nonempty request")
+		}
+	}
 }
 
 type preparedSecretTransport func(*http.Request) (*http.Response, error)
@@ -51,12 +74,24 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 		t.Fatal(err)
 	}
 	var spec preparedSecretCrashSpec
-	if err := json.Unmarshal(data, &spec); err != nil || !filepath.IsAbs(spec.Kubeconfig) || !strings.HasPrefix(spec.Namespace, "runner-prepared-") || spec.Account == "" ||
-		!slices.Contains([]string{"pod-reply", "first-secret-reply", "last-secret-reply", "readiness-reply"}, spec.Stage) {
+	if err := json.Unmarshal(data, &spec); err != nil || !filepath.IsAbs(spec.Kubeconfig) || !strings.HasPrefix(spec.Namespace, "runner-prepared-") || spec.Account == "" {
 		t.Fatal("invalid parent fixture configuration")
 	}
+	revoking := len(spec.Revocation) != 0
+	stages := []string{"pod-reply", "first-secret-reply", "last-secret-reply", "readiness-reply"}
+	if revoking {
+		stages = []string{"revocation-claim-reply", "revocation-receipt-reply", "revocation-delete-reply"}
+	}
+	if !slices.Contains(stages, spec.Stage) || revoking && len(spec.Request) != 0 {
+		t.Fatal("invalid parent fixture operation")
+	}
 	req := &runnerv1.PrepareWorkloadRequest{}
-	if err := protojson.Unmarshal(spec.Request, req); err != nil {
+	revocation := &runnerv1.RevokeWorkloadPreparationRequest{}
+	if revoking {
+		if err := protojson.Unmarshal(spec.Revocation, revocation); err != nil || revocation.WorkloadAnchor == nil {
+			t.Fatal("invalid revocation request")
+		}
+	} else if err := protojson.Unmarshal(spec.Request, req); err != nil || req.Workload == nil {
 		t.Fatal("invalid synthetic request")
 	}
 	cfg, err := clientcmd.BuildConfigFromFlags("", spec.Kubeconfig)
@@ -87,6 +122,12 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 			hit := spec.Stage == "pod-reply" && request.Method == http.MethodPost && request.URL.Path == path+"/pods" ||
 				request.Method == http.MethodPost && request.URL.Path == path+"/secrets" && (spec.Stage == "first-secret-reply" && secrets == 1 || spec.Stage == "last-secret-reply" && secrets == 2) ||
 				spec.Stage == "readiness-reply" && request.Method == http.MethodPatch && request.URL.Path == path+"/pods/"+podNameFromID(req.Workload.WorkloadId)
+			if revoking {
+				ownerPath := path + "/configmaps/" + resourceAnchorName(revocation.WorkloadAnchor)
+				hit = spec.Stage == "revocation-claim-reply" && request.Method == http.MethodPatch && request.URL.Path == ownerPath ||
+					spec.Stage == "revocation-receipt-reply" && request.Method == http.MethodPost && request.URL.Path == path+"/configmaps" ||
+					spec.Stage == "revocation-delete-reply" && request.Method == http.MethodDelete && request.URL.Path == ownerPath
+			}
 			if hit {
 				if _, err := fmt.Fprintln(checkpoint, "committed"); err != nil {
 					return nil, err
@@ -104,7 +145,11 @@ func TestPreparedSecretsCrashProcess(t *testing.T) {
 	}
 	s := New(Options{Clientset: client, Namespace: spec.Namespace, StorageSize: "1Mi", Logger: zap.NewNop(),
 		SupportingContainerResources: &config.ComputeResources{RequestsCPU: "50m", RequestsMemory: "64Mi", LimitsCPU: "250m", LimitsMemory: "128Mi"}})
-	_, err = s.PrepareWorkload(ctx, req)
+	if revoking {
+		_, err = s.RevokeWorkloadPreparation(ctx, revocation)
+	} else {
+		_, err = s.PrepareWorkload(ctx, req)
+	}
 	t.Fatalf("parent did not kill at the requested write: %v", err)
 }
 

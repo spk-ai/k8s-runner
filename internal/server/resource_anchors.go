@@ -130,6 +130,13 @@ func (s *Server) ReserveResourceAnchor(ctx context.Context, req *runnerv1.Reserv
 		return nil, err
 	}
 	objects := s.clientset.CoreV1().ConfigMaps(s.namespace)
+	if intent.Kind == runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_WORKLOAD {
+		if _, err := objects.Get(ctx, preparationRevocationName(intent), metav1.GetOptions{}); err == nil {
+			return nil, status.Error(codes.FailedPrecondition, "resource_anchor_permanently_revoked")
+		} else if !apierrors.IsNotFound(err) {
+			return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
+		}
+	}
 	cm, err := objects.Get(ctx, resourceAnchorName(intent), metav1.GetOptions{})
 	if apierrors.IsNotFound(err) {
 		data, marshalErr := protojson.Marshal(intent)
