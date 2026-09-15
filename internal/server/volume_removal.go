@@ -56,6 +56,14 @@ func validateVolumeRemovalTarget(expected *runnerv1.VolumeListItem) error {
 			return status.Error(codes.InvalidArgument, "invalid_volume_identity_label")
 		}
 	}
+	if anchor := expected.Anchor; anchor != nil {
+		if err := validateResourceAnchor(anchor, true); err != nil {
+			return err
+		}
+		if anchor.Kind != runnerv1.ResourceAnchorKind_RESOURCE_ANCHOR_KIND_VOLUME || anchor.ResourceId != key || anchor.BackendId != backend || !maps.Equal(anchor.IdentityLabels, identity) {
+			return status.Error(codes.InvalidArgument, "volume_anchor_target_mismatch")
+		}
+	}
 	return nil
 }
 
@@ -67,6 +75,9 @@ func (s *Server) RemoveVolumeBound(ctx context.Context, req *runnerv1.RemoveVolu
 	expected := req.GetExpected()
 	if err := validateVolumeRemovalTarget(expected); err != nil {
 		return nil, err
+	}
+	if expected.Anchor != nil {
+		return nil, status.Error(codes.FailedPrecondition, "anchored_volume_removal_required")
 	}
 	if _, err := s.checkVolumeBackend(ctx, expected.BackendId); err != nil {
 		return nil, err

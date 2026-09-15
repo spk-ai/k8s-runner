@@ -770,6 +770,10 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	if err != nil {
 		return "", err
 	}
+	return s.ensurePVCObject(ctx, pvc, nil)
+}
+
+func (s *Server) ensurePVCObject(ctx context.Context, pvc *corev1.PersistentVolumeClaim, anchor *runnerv1.ResourceAnchor) (string, error) {
 	pvcName := pvc.Name
 	claims := s.clientset.CoreV1().PersistentVolumeClaims(s.namespace)
 	existing, err := claims.Get(ctx, pvcName, metav1.GetOptions{})
@@ -786,8 +790,20 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	if err != nil {
 		return "", grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
-	if err := validatePVCReuse(existing, pvc); err != nil {
-		return "", err
+	if anchor == nil {
+		if err := validatePVCReuse(existing, pvc); err != nil {
+			return "", err
+		}
+	} else {
+		if existing == nil {
+			return "", status.Error(codes.FailedPrecondition, "anchored_volume_identity_missing")
+		}
+		if err := matchAnchoredMetadata(existing.ObjectMeta, anchor); err != nil {
+			return "", err
+		}
+		if err := validatePVCReuseSpec(existing, pvc); err != nil {
+			return "", err
+		}
 	}
 	for _, finalizer := range existing.Finalizers {
 		if strings.HasPrefix(finalizer, preparedHoldPrefix) {
