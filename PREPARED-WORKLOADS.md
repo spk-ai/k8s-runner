@@ -15,9 +15,14 @@ It is not a drop-in image for installed controllers.
   Its annotation stores backend/workload/volume identities, not credentials.
   Kubernetes >=1.30 is verified before resource creation; Pod creation requests
   strict field validation. Trusted admission must preserve the gate.
-- Temporary Secrets get an owner reference to the exact returned Pod UID via
-  UID/resource-version checked patches. Normal Kubernetes GC removes them after
-  Pod deletion. Partial preparation still needs orphan reconciliation.
+- The gated Pod starts in native `preparing` state. Temporary Secrets are staged
+  in memory until its UID is confirmed, then created with that exact Pod owner
+  in the CREATE itself. A crash cannot interrupt a separate ownership PATCH.
+  After every Secret CREATE is acknowledged and validated, a Pod UID/resource-
+  version checked PATCH commits `prepared` state without removing its gate.
+  Incomplete setup cannot activate; failed/uncertain Pod creation writes no
+  credentials. Kubernetes GC owns even delayed credential writes after Pod
+  removal. No prepared-path name-only Secret deletion or adoption is used.
 - The caller must persist/verify the binding before `ActivateWorkload`.
   Activation checks exact Pod/backend/claim identity, applies a per-Pod
   `agyn.io/workload-<pod-uid>` finalizer to every claim, and only then removes its
@@ -52,6 +57,10 @@ deletion-pending flag and resource version. Activation is not container readines
 This is not an atomic multi-resource snapshot, authenticated receipt, recovery
 of an unknown prepare intent, or node/storage fencing.
 
+Native `preparing` is not inspectable as a completed prepared workload. Recovery
+of a lost prepare response still requires a separate, identity-checked discovery
+contract; it must not infer completion from Pod absence or replay preparation.
+
 Inspection adds no RBAC mutation rights. The focused tests assert GET-only
 Kubernetes actions for successful, conflicting and failed inspections.
 
@@ -72,6 +81,36 @@ Out-of-protocol gate/identity/finalizer modification, privileged force deletion,
 node partitions, cloned storage/cluster identity and legacy writers require
 separate enforcement. A late preparation can leave a gated orphan; a late hold
 write can require another bound cleanup attempt. Both need reconciliation.
+
+## Atomic Secret Ownership
+
+`fix/prepared-secret-ownership` is a dependent follow-up to prepared-inspection
+runner `73c3a20`, not a standalone upstream-base patch. It adds no API schema or
+RBAC grant. The legacy Start path retains its original startup rollback behavior.
+The installed platform is not changed by these native fixtures.
+
+The ordinary and full race suites each pass 521 test entries. Prepared tests pass
+1,880 entries over 20 race-enabled repetitions. Build and unfiltered vet pass.
+Opt-in live entries skip outside their gates; the dedicated child entry skips
+unless launched by its parent. These skips are not claimed as native acceptance.
+
+The explicit Kubernetes run passes eight scenarios plus the parent: the existing
+execution/resume, PVC hold and stale activation cases, four real SIGKILL cases,
+and a delayed Secret CREATE case. The child runs the production native prepare
+method with chart-scoped impersonation and is killed after a committed Pod,
+first Secret, last Secret or readiness PATCH, before that reply reaches the
+method. The parent independently checks retained state, exact Pod ownership,
+activation denial for incomplete setup, exact removal and observed Secret GC.
+Two held Secret CREATEs also commit after owner deletion and are collected.
+
+The fixture reads the interrupted Pod binding as an operator to perform cleanup.
+That does not implement automatic registry/controller recovery of unknown prepare
+outcomes. Delayed Pod/PVC creation, old unowned credentials, durable external
+credential revocation, Secret-GC completion tracking, all-writer upgrades and
+node/storage fencing remain separate work. No model credentials or A2A agent
+are used. Pod absence alone is not evidence that all credentials are gone.
+
+Owner semantics follow Kubernetes [owners and dependents](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/).
 
 ## Verification
 
@@ -106,8 +145,8 @@ Generate the required local API before building this dependent runner. Run this
 in the matching `api-prepared-inspection` checkout, with adjacent checkouts:
 
 ```bash
-buf generate . --template ../runner-prepared-inspection/buf.gen.yaml \
-  --output ../runner-prepared-inspection --include-imports \
+buf generate . --template ../runner-prepared-secret-ownership/buf.gen.yaml \
+  --output ../runner-prepared-secret-ownership --include-imports \
   --path proto/agynio/api/runner/v1 \
   --path proto/agynio/api/runners/v1 --path proto/agynio/api/gateway/v1
 ```

@@ -72,8 +72,9 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	}
 
 	startup := newStartupSecrets(s, workloadID)
+	startup.prepared = preparation != nil
 	defer func() {
-		if returnedErr != nil {
+		if returnedErr != nil && preparation == nil {
 			if err := startup.cleanup(ctx); err != nil {
 				s.logger.Error("startup secret cleanup unconfirmed", zap.String("workload_id", workloadID), zap.String("startup_attempt", startup.attempt), zap.Error(err))
 				returnedErr = status.Errorf(status.Code(returnedErr), "%s; startup_secret_cleanup_unconfirmed", status.Convert(returnedErr).Message())
@@ -183,7 +184,10 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		if err := preparation.accept(ctx, s, createdPod); err != nil {
 			return nil, err
 		}
-		if err := startup.attachPreparedOwner(ctx, createdPod); err != nil {
+		if err := startup.createPrepared(ctx, createdPod); err != nil {
+			return nil, err
+		}
+		if err := preparation.complete(ctx, s); err != nil {
 			return nil, err
 		}
 	}
@@ -585,7 +589,7 @@ func (s *Server) buildImagePullSecrets(
 			},
 		}
 
-		if _, err := startup.create(ctx, secret); err != nil {
+		if err := startup.stageOrCreate(ctx, secret); err != nil {
 			return nil, nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 		}
 
@@ -1125,7 +1129,7 @@ func (s *Server) createInlineFilesSecret(ctx context.Context, workloadID string,
 		Type: corev1.SecretTypeOpaque,
 		Data: data,
 	}
-	if _, err := startup.create(ctx, secret); err != nil {
+	if err := startup.stageOrCreate(ctx, secret); err != nil {
 		return "", nil, grpcErrorFromKube(s.logger, err, codes.Internal)
 	}
 

@@ -123,19 +123,12 @@ func TestPreparedSecretsAreOwnedByExactPod(t *testing.T) {
 			req.Workload.InlineFiles = map[string][]byte{"/fixture-marker": []byte("not-a-credential")}
 			req.Workload.Main.InlineFileMounts = []*runnerv1.InlineFileMount{{Path: "/fixture-marker"}}
 			if failure != "" {
-				client.PrependReactor("patch", "secrets", func(action kubetesting.Action) (bool, runtime.Object, error) {
-					name := action.(kubetesting.PatchAction).GetName()
+				client.PrependReactor("create", "secrets", func(action kubetesting.Action) (bool, runtime.Object, error) {
+					secret := action.(kubetesting.CreateAction).GetObject().(*corev1.Secret)
 					if failure == "forbidden" {
-						return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, name, errors.New("fixture"))
+						return true, nil, apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, secret.Name, errors.New("fixture"))
 					}
-					object, err := client.Tracker().Get(action.GetResource(), "default", name)
-					if err != nil {
-						return true, nil, err
-					}
-					object.(*corev1.Secret).UID = types.UID(uuid.NewString())
-					if err := client.Tracker().Update(action.GetResource(), object, "default"); err != nil {
-						return true, nil, err
-					}
+					secret.OwnerReferences[0].UID = types.UID(uuid.NewString())
 					return false, nil, nil
 				})
 			}
@@ -148,15 +141,19 @@ func TestPreparedSecretsAreOwnedByExactPod(t *testing.T) {
 				t.Fatalf("secret binding failure allowed execution: %v", err)
 			}
 			secrets, err := client.CoreV1().Secrets("default").List(context.Background(), metav1.ListOptions{})
-			if err != nil || len(secrets.Items) != 1 {
+			expected := 1
+			if failure == "forbidden" {
+				expected = 0
+			}
+			if err != nil || len(secrets.Items) != expected {
 				t.Fatalf("temporary secret lost: %v", err)
 			}
-			owners := secrets.Items[0].OwnerReferences
 			if failure == "" {
+				owners := secrets.Items[0].OwnerReferences
 				if response.Binding.InstanceUid != string(pod.UID) || len(owners) != 1 || owners[0].Kind != "Pod" || owners[0].UID != pod.UID || owners[0].Name != pod.Name {
 					t.Fatal("secret bound to wrong incarnation")
 				}
-			} else if response != nil || len(owners) != 0 {
+			} else if response != nil || pod.Annotations[preparedStateAnnotation] != "preparing" {
 				t.Fatal("foreign/rejected secret ownership accepted")
 			}
 		})

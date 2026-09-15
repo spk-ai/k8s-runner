@@ -182,7 +182,7 @@ func (p *workloadPreparation) gate(ctx context.Context, s *Server, pod *corev1.P
 		return status.Error(codes.InvalidArgument, "prepared_binding_too_large")
 	}
 	pod.Annotations[preparedBindingAnnotation] = string(data)
-	pod.Annotations[preparedStateAnnotation] = "prepared"
+	pod.Annotations[preparedStateAnnotation] = "preparing"
 	pod.Spec.SchedulingGates = []corev1.PodSchedulingGate{{Name: preparedGate}}
 	return nil
 }
@@ -199,13 +199,44 @@ func (p *workloadPreparation) accept(ctx context.Context, s *Server, pod *corev1
 	if err := s.matchPreparedPod(pod, binding); err != nil {
 		return err
 	}
-	if pod.DeletionTimestamp != nil || pod.Spec.NodeName != "" || !hasPreparedGate(pod) || pod.Annotations[preparedStateAnnotation] != "prepared" {
+	if pod.DeletionTimestamp != nil || pod.Spec.NodeName != "" || !hasPreparedGate(pod) || pod.Annotations[preparedStateAnnotation] != "preparing" {
 		return status.Error(codes.FailedPrecondition, "prepared_pod_not_gated")
 	}
 	if _, err := s.checkVolumeBackend(ctx, binding.BackendId); err != nil {
 		return err
 	}
 	p.binding = binding
+	return nil
+}
+
+func (p *workloadPreparation) complete(ctx context.Context, s *Server) error {
+	pods := s.clientset.CoreV1().Pods(s.namespace)
+	pod, err := pods.Get(ctx, podNameFromID(p.binding.WorkloadId), metav1.GetOptions{})
+	if err != nil {
+		return grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if err := s.matchPreparedPod(pod, p.binding); err != nil {
+		return err
+	}
+	if pod.DeletionTimestamp != nil || pod.Spec.NodeName != "" || !hasPreparedGate(pod) || pod.Annotations[preparedStateAnnotation] != "preparing" {
+		return status.Error(codes.FailedPrecondition, "prepared_setup_not_completable")
+	}
+	if _, err := s.checkVolumeBackend(ctx, p.binding.BackendId); err != nil {
+		return err
+	}
+	// This commits only credential setup. Execution still requires the registry's
+	// separate activation authorization and an exact-binding gate removal.
+	patched, err := pods.Patch(ctx, pod.Name, types.JSONPatchType, preparedObjectPatch(pod.ObjectMeta,
+		preparedPatchOperation{"replace", "/metadata/annotations/agyn.io~1prepared-state", "prepared"}), metav1.PatchOptions{})
+	if err != nil {
+		return grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if err := s.matchPreparedPod(patched, p.binding); err != nil {
+		return err
+	}
+	if patched.DeletionTimestamp != nil || patched.Spec.NodeName != "" || !hasPreparedGate(patched) || patched.Annotations[preparedStateAnnotation] != "prepared" {
+		return status.Error(codes.FailedPrecondition, "prepared_setup_unconfirmed")
+	}
 	return nil
 }
 
