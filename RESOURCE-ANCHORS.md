@@ -104,3 +104,7 @@ and checks identity before cleanup. Namespace deletion retires only fixture
 volumes/anchors after exact workload removal and hold checks; this is not the
 missing production anchored-volume deletion contract. No finalizers are
 stripped and no installed workload, credential binding or PVC is changed.
+
+The dependent [anchored retirement proposal](ANCHORED-VOLUME-RETIREMENT.md)
+adds a distinct checked PVC-and-owner deletion capability and its own evidence.
+It does not change the historical scope of the anchor acceptance above.
