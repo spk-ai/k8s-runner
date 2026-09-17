@@ -93,7 +93,13 @@ func (s *Server) StartWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		})
 	}
 
-	containers, initContainers, sidecarNames, err := buildContainers(req, volumes, inlineFileKeys)
+	flavor, err := s.resolveFlavor(strings.TrimSpace(req.GetFlavor()))
+	if err != nil {
+		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
+
+	containers, initContainers, sidecarNames, err := buildContainers(req, volumes, inlineFileKeys, flavor)
 	if err != nil {
 		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
 		return nil, err
@@ -717,7 +723,7 @@ func (s *Server) ensurePVC(ctx context.Context, volume *runnerv1.VolumeSpec, lab
 	return pvcName, nil
 }
 
-func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume, inlineFileKeys map[string]string) ([]corev1.Container, []corev1.Container, []string, error) {
+func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume, inlineFileKeys map[string]string, flavor workloadResources) ([]corev1.Container, []corev1.Container, []string, error) {
 	volumeLookup := make(map[string]struct{}, len(volumes))
 	for _, volume := range volumes {
 		volumeLookup[volume.Name] = struct{}{}
@@ -731,6 +737,7 @@ func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	applyResources(&mainContainer, flavor.main)
 	containers = append(containers, mainContainer)
 	nameLookup[mainContainer.Name] = struct{}{}
 
@@ -740,6 +747,7 @@ func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume
 		if err != nil {
 			return nil, nil, nil, err
 		}
+		applyResources(&container, flavor.sidecar)
 		if _, exists := nameLookup[container.Name]; exists {
 			return nil, nil, nil, status.Errorf(codes.InvalidArgument, "duplicate_container_name: %s", container.Name)
 		}
@@ -761,6 +769,15 @@ func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume
 	}
 
 	return containers, initContainers, sidecarNames, nil
+}
+
+// applyResources sizes a container. A nil requirement leaves it untouched, so
+// an unsized flavor and a flavorless workload produce the same pod.
+func applyResources(container *corev1.Container, requirements *corev1.ResourceRequirements) {
+	if requirements == nil {
+		return
+	}
+	container.Resources = *requirements.DeepCopy()
 }
 
 func buildContainer(spec *runnerv1.ContainerSpec, fallbackName string, volumeLookup map[string]struct{}, inlineFileKeys map[string]string) (corev1.Container, error) {

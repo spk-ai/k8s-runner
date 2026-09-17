@@ -136,3 +136,46 @@ func TestStorageClassNameForMapsEntries(t *testing.T) {
 		t.Fatal("expected unknown class to be unresolved")
 	}
 }
+
+func TestLoadCatalogAcceptsFlavorWithoutSidecarResources(t *testing.T) {
+	path := writeCatalog(t, `
+flavors:
+  - name: ram-2gb
+    resources: {requestsCpu: "1", requestsMemory: 2Gi, limitsCpu: "1", limitsMemory: 2Gi}
+`)
+
+	catalog, err := LoadCatalog(path)
+	if err != nil {
+		t.Fatalf("LoadCatalog returned error: %v", err)
+	}
+	if !catalog.Flavors[0].SidecarResources.IsZero() {
+		t.Fatal("expected sidecar resources to be unset")
+	}
+}
+
+func TestLoadCatalogRejectsIncompleteSidecarResources(t *testing.T) {
+	path := writeCatalog(t, `
+flavors:
+  - name: ram-2gb
+    resources: {requestsCpu: "1", requestsMemory: 2Gi, limitsCpu: "1", limitsMemory: 2Gi}
+    sidecarResources: {requestsCpu: 100m, requestsMemory: 128Mi}
+`)
+
+	_, err := LoadCatalog(path)
+	if err == nil || !strings.Contains(err.Error(), "sidecarResources.limits") {
+		t.Fatalf("expected partial sidecarResources to be rejected, got %v", err)
+	}
+}
+
+func TestFlavorForMapsEntries(t *testing.T) {
+	catalog := Catalog{Flavors: []FlavorEntry{
+		{Name: "ram-2gb", Resources: ComputeResources{RequestsMemory: "2Gi"}},
+	}}
+
+	if flavor, ok := catalog.FlavorFor("ram-2gb"); !ok || flavor.Resources.RequestsMemory != "2Gi" {
+		t.Fatalf("expected ram-2gb to resolve, got %+v (ok=%v)", flavor, ok)
+	}
+	if _, ok := catalog.FlavorFor("nope"); ok {
+		t.Fatal("expected unknown flavor to be unresolved")
+	}
+}

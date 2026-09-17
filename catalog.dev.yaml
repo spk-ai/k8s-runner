@@ -6,15 +6,25 @@ flavors:
     default: true
     resources:
       requestsCpu: "500m"
-      requestsMemory: "2Gi"
+      requestsMemory: "512Mi"
       limitsCpu: "2"
       limitsMemory: "2Gi"
+    sidecarResources:
+      requestsCpu: "50m"
+      requestsMemory: "64Mi"
+      limitsCpu: "500m"
+      limitsMemory: "256Mi"
   - name: ram-4gb
     resources:
       requestsCpu: "1"
-      requestsMemory: "4Gi"
+      requestsMemory: "1Gi"
       limitsCpu: "4"
       limitsMemory: "4Gi"
+    sidecarResources:
+      requestsCpu: "50m"
+      requestsMemory: "64Mi"
+      limitsCpu: "500m"
+      limitsMemory: "256Mi"
 storageClasses:
   - name: default
     default: true

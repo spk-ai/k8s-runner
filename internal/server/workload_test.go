@@ -106,7 +106,7 @@ func TestBuildContainersMapsMainSpec(t *testing.T) {
 		},
 	}
 
-	containers, initContainers, sidecars, err := buildContainers(req, nil, nil)
+	containers, initContainers, sidecars, err := buildContainers(req, nil, nil, workloadResources{})
 	if err != nil {
 		t.Fatalf("buildContainers returned error: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestBuildContainersRejectsDuplicateNames(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := buildContainers(req, nil, nil)
+	_, _, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err == nil {
 		t.Fatalf("expected duplicate container error")
 	}
@@ -218,7 +218,7 @@ func TestBuildContainersRejectsEntrypointWithSpaces(t *testing.T) {
 		Main: &runnerv1.ContainerSpec{Name: "main", Image: "busybox", Entrypoint: "/bin/sh -c"},
 	}
 
-	_, _, _, err := buildContainers(req, nil, nil)
+	_, _, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err == nil {
 		t.Fatalf("expected entrypoint validation error")
 	}
@@ -239,7 +239,7 @@ func TestBuildContainersMapsInitRestartPolicy(t *testing.T) {
 		},
 	}
 
-	_, initContainers, _, err := buildContainers(req, nil, nil)
+	_, initContainers, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err != nil {
 		t.Fatalf("buildContainers returned error: %v", err)
 	}
@@ -262,7 +262,7 @@ func TestBuildContainersOmitsInitRestartPolicy(t *testing.T) {
 		},
 	}
 
-	_, initContainers, _, err := buildContainers(req, nil, nil)
+	_, initContainers, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err != nil {
 		t.Fatalf("buildContainers returned error: %v", err)
 	}
@@ -282,7 +282,7 @@ func TestBuildContainersRejectsInitDuplicateNameWithMain(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := buildContainers(req, nil, nil)
+	_, _, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err == nil {
 		t.Fatalf("expected duplicate container error")
 	}
@@ -304,7 +304,7 @@ func TestBuildContainersRejectsInitDuplicateNames(t *testing.T) {
 		},
 	}
 
-	_, _, _, err := buildContainers(req, nil, nil)
+	_, _, _, err := buildContainers(req, nil, nil, workloadResources{})
 	if err == nil {
 		t.Fatalf("expected duplicate container error")
 	}

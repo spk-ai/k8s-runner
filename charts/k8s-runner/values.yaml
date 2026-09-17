@@ -96,19 +96,33 @@ catalogPath: /etc/agyn/runner-catalog/catalog.yaml
 
 catalog:
   flavors:
+    # Requests are what a workload reserves on a node for its whole life;
+    # limits are what it may burst to. An agent waiting on an LLM call idles far
+    # below its ceiling, so reserving the ceiling would strand most of a node.
     - name: ram-2gb
       default: true
       resources:
         requestsCpu: "500m"
-        requestsMemory: "2Gi"
+        requestsMemory: "512Mi"
         limitsCpu: "2"
         limitsMemory: "2Gi"
+      sidecarResources:
+        requestsCpu: "50m"
+        requestsMemory: "64Mi"
+        limitsCpu: "500m"
+        limitsMemory: "256Mi"
     - name: ram-4gb
       resources:
         requestsCpu: "1"
-        requestsMemory: "4Gi"
+        requestsMemory: "1Gi"
         limitsCpu: "4"
         limitsMemory: "4Gi"
+      sidecarResources:
+        requestsCpu: "50m"
+        requestsMemory: "64Mi"
+        limitsCpu: "500m"
+        limitsMemory: "256Mi"
+
   storageClasses:
     # An empty storageClassName uses the cluster default, which is what
     # unclassed volumes already got.

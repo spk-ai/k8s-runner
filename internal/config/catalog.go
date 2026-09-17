@@ -20,10 +20,14 @@ type Catalog struct {
 }
 
 type FlavorEntry struct {
-	Name       string           `yaml:"name"`
-	Default    bool             `yaml:"default"`
-	Deprecated bool             `yaml:"deprecated"`
-	Resources  ComputeResources `yaml:"resources"`
+	Name       string `yaml:"name"`
+	Default    bool   `yaml:"default"`
+	Deprecated bool   `yaml:"deprecated"`
+	// Resources size the workload's main container, SidecarResources each of
+	// its sidecars. One name covers both so a workload asks for a size, not a
+	// per-container budget. Unset SidecarResources leaves sidecars unsized.
+	Resources        ComputeResources `yaml:"resources"`
+	SidecarResources ComputeResources `yaml:"sidecarResources"`
 }
 
 type ComputeResources struct {
@@ -31,6 +35,25 @@ type ComputeResources struct {
 	RequestsMemory string `yaml:"requestsMemory"`
 	LimitsCPU      string `yaml:"limitsCpu"`
 	LimitsMemory   string `yaml:"limitsMemory"`
+}
+
+// IsZero reports whether nothing at all was declared.
+func (r ComputeResources) IsZero() bool {
+	for _, value := range r.fields() {
+		if strings.TrimSpace(value) != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func (r ComputeResources) fields() map[string]string {
+	return map[string]string{
+		"requestsCpu":    r.RequestsCPU,
+		"requestsMemory": r.RequestsMemory,
+		"limitsCpu":      r.LimitsCPU,
+		"limitsMemory":   r.LimitsMemory,
+	}
 }
 
 type StorageClassEntry struct {
@@ -85,14 +108,19 @@ func (c Catalog) validate() error {
 		if flavor.Default {
 			defaults++
 		}
-		for field, value := range map[string]string{
-			"requestsCpu":    flavor.Resources.RequestsCPU,
-			"requestsMemory": flavor.Resources.RequestsMemory,
-			"limitsCpu":      flavor.Resources.LimitsCPU,
-			"limitsMemory":   flavor.Resources.LimitsMemory,
-		} {
+		for field, value := range flavor.Resources.fields() {
 			if strings.TrimSpace(value) == "" {
 				return fmt.Errorf("flavor %q: %s is empty", name, field)
+			}
+		}
+		// Sidecar sizing is opt-in, but half of it is a typo rather than a
+		// choice: a flavor that sets two of the four would silently size
+		// sidecars by a budget nobody wrote.
+		if !flavor.SidecarResources.IsZero() {
+			for field, value := range flavor.SidecarResources.fields() {
+				if strings.TrimSpace(value) == "" {
+					return fmt.Errorf("flavor %q: sidecarResources.%s is empty", name, field)
+				}
 			}
 		}
 	}
@@ -119,6 +147,18 @@ func (c Catalog) validate() error {
 		return fmt.Errorf("at most one storage class may be default, got %d", classDefaults)
 	}
 	return nil
+}
+
+// FlavorFor maps a catalog entry name to the sizes backing it. An unknown name
+// resolves to nothing, which is what makes an unresolvable reference fail the
+// start rather than silently land unsized.
+func (c Catalog) FlavorFor(name string) (FlavorEntry, bool) {
+	for _, flavor := range c.Flavors {
+		if flavor.Name == name {
+			return flavor, true
+		}
+	}
+	return FlavorEntry{}, false
 }
 
 // StorageClassNameFor maps a catalog entry name to the Kubernetes
