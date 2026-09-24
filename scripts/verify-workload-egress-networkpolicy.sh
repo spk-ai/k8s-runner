@@ -225,7 +225,9 @@ assert_contains '  ingress: []'
 assert_not_contains '    - Egress'
 assert_not_contains 'from:'
 
+# Namespace fallback is an ingress-only case; scoped RBAC requires a namespace.
 helm template k8s-runner "$chart_dir" --namespace release-namespace \
+  --set rbac.create=false \
   --set workloadIngressNetworkPolicy.enabled=true \
   --set workloadIngressNetworkPolicy.name=isolated-fixture \
   --set workloadNamespace= \
