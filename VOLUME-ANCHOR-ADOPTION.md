@@ -4,8 +4,8 @@ Dependent native proposal requiring the matching API contract and a future
 registry admission/migration coordinator. It is not installed or a drop-in
 production upgrade. Existing repository licensing is unchanged.
 
-API dependency: [`spk-ai/api` `66fd206`](https://github.com/spk-ai/api/commit/66fd206cf20b0ccea3e0a01b1f0c7ae60a0cbf75),
-branch `feat/volume-anchor-adoption`, built on the preparation-revocation contract.
+Rebased API dependency: [`spk-ai/api` `c21440b`](https://github.com/spk-ai/api/commit/c21440bbd571d439c7c8aa316600d0d06392ccbf),
+branch `sync/2026-09-24-volume-adoption`, including upstream flavor contracts.
 Generate the native stubs from that checkout; the published BSR module does not
 yet contain this proposal.
 

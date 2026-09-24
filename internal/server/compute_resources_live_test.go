@@ -32,6 +32,14 @@ import (
 // This deliberately performs a cgroup-bounded OOM kill. It is never part of
 // ordinary CI, never uses the current kubectl context, and carries no secrets.
 func TestLiveComputeResources(t *testing.T) {
+	testLiveComputeResources(t, false)
+}
+
+func TestLiveComputeFlavorResources(t *testing.T) {
+	testLiveComputeResources(t, true)
+}
+
+func testLiveComputeResources(t *testing.T, withFlavor bool) {
 	if os.Getenv("RUNNER_LIVE_RESOURCE_TEST") != "trusted-local" {
 		t.Skip("requires an explicit trusted-local Kubernetes resource test")
 	}
@@ -127,6 +135,10 @@ func TestLiveComputeResources(t *testing.T) {
 	}
 	grpcServer := grpc.NewServer()
 	runnerv1.RegisterRunnerServiceServer(grpcServer, New(Options{Clientset: kube, RestConfig: cfg, Namespace: ns.Name,
+		Catalog: config.Catalog{Flavors: []config.FlavorEntry{{Name: "fixture-flavor",
+			Resources:        config.ComputeResources{RequestsCPU: "100m", RequestsMemory: "64Mi", LimitsCPU: "1", LimitsMemory: "256Mi"},
+			SidecarResources: config.ComputeResources{RequestsCPU: "50m", RequestsMemory: "64Mi", LimitsCPU: "750m", LimitsMemory: "128Mi"},
+		}}},
 		Logger: zap.NewNop(), SupportingContainerResources: &config.ComputeResources{
 			RequestsCPU: "50m", RequestsMemory: "64Mi", LimitsCPU: "500m", LimitsMemory: "128Mi",
 		}}))
@@ -142,6 +154,10 @@ func TestLiveComputeResources(t *testing.T) {
 	container := func(name, program string) *runnerv1.ContainerSpec {
 		return &runnerv1.ContainerSpec{Name: name, Image: image, Entrypoint: "node", Cmd: []string{"-e", program}}
 	}
+	helperCPU := 500
+	if withFlavor {
+		helperCPU = 750
+	}
 	start := func(program string, withSupporting bool) *corev1.Pod {
 		t.Helper()
 		id := uuid.NewString()
@@ -150,9 +166,13 @@ func TestLiveComputeResources(t *testing.T) {
 		main.Resources = &runnerv1.ComputeResources{RequestsCpu: "100m", RequestsMemory: "64Mi", LimitsCpu: "250m", LimitsMemory: "128Mi"}
 		req := &runnerv1.StartWorkloadRequest{WorkloadId: id, Main: main,
 			Capabilities: []string{config.CapabilityComputeResources}, Labels: map[string]string{ownerLabel: runID}}
+		if withFlavor {
+			req.Flavor = "fixture-flavor"
+		}
 		if withSupporting {
 			probe := liveResourceProbe + `check(500); console.log(JSON.stringify({bounds: snapshot()}));`
-			req.Sidecars = []*runnerv1.ContainerSpec{container("helper", probe)}
+			helperProbe := liveResourceProbe + fmt.Sprintf(`check(%d); console.log(JSON.stringify({bounds: snapshot()}));`, helperCPU)
+			req.Sidecars = []*runnerv1.ContainerSpec{container("helper", helperProbe)}
 			restartable := container("restartable", probe+`setInterval(() => {}, 1000); setTimeout(() => process.exit(0), 180000);`)
 			restartable.AdditionalProperties = map[string]string{"restart_policy": "Always"}
 			req.InitContainers = []*runnerv1.ContainerSpec{container("init", probe), restartable}
@@ -223,7 +243,11 @@ func TestLiveComputeResources(t *testing.T) {
 	t.Logf("CPU evidence: %s", strings.TrimSpace(cpuLog))
 	for _, name := range []string{"init", "restartable", "helper"} {
 		value := logs(cpu, name)
-		if !strings.Contains(value, `"memory":134217728`) || !strings.Contains(value, `"millicores":500`) {
+		expectedCPU := 500
+		if name == "helper" {
+			expectedCPU = helperCPU
+		}
+		if !strings.Contains(value, `"memory":134217728`) || !strings.Contains(value, fmt.Sprintf(`"millicores":%d`, expectedCPU)) {
 			t.Fatalf("supporting cgroup not bounded: %s: %s", name, value)
 		}
 		t.Logf("%s cgroup: %s", name, strings.TrimSpace(value))

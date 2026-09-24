@@ -70,6 +70,10 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	if err != nil {
 		return nil, err
 	}
+	flavor, err := s.resolveFlavor(strings.TrimSpace(req.GetFlavor()))
+	if err != nil {
+		return nil, status.Error(codes.InvalidArgument, err.Error())
+	}
 
 	startup := newStartupSecrets(s, workloadID)
 	startup.prepared = preparation != nil
@@ -107,12 +111,6 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 				Secret: &corev1.SecretVolumeSource{SecretName: inlineSecretName},
 			},
 		})
-	}
-
-	flavor, err := s.resolveFlavor(strings.TrimSpace(req.GetFlavor()))
-	if err != nil {
-		s.deleteImagePullSecrets(ctx, workloadID, secretNames)
-		return nil, status.Error(codes.InvalidArgument, err.Error())
 	}
 
 	containers, initContainers, sidecarNames, err := buildContainers(req, volumes, inlineFileKeys, flavor)
@@ -871,10 +869,10 @@ func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume
 	return containers, initContainers, sidecarNames, nil
 }
 
-// applyResources sizes a container. A nil requirement leaves it untouched, so
-// an unsized flavor and a flavorless workload produce the same pod.
+// Explicit capability-gated bounds take precedence over flavor defaults.
+// Supporting init/injected container bounds are applied separately afterward.
 func applyResources(container *corev1.Container, requirements *corev1.ResourceRequirements) {
-	if requirements == nil {
+	if requirements == nil || len(container.Resources.Requests) != 0 || len(container.Resources.Limits) != 0 {
 		return
 	}
 	container.Resources = *requirements.DeepCopy()

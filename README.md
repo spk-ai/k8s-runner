@@ -2,6 +2,12 @@
 
 k8s-runner is the Kubernetes-native implementation of the RunnerService gRPC API.
 
+The `sync/2026-09-24-volume-adoption` branch rebases the tested contribution
+stack onto upstream `3bd3355`. Generate from `spk-ai/api` `c21440b` on
+`sync/2026-09-24-volume-adoption`, which includes upstream flavor contracts and
+the unpublished lifecycle proposals. The older dependency revisions below are
+historical acceptance records, not the build input for this combination.
+
 The dependent [preparation-revocation proposal](PREPARATION-REVOCATION.md)
 recovers unbound interrupted provisioning using durable native evidence.
 
@@ -225,6 +231,17 @@ whole millicores/bytes, and have its request no greater than its limit. Validati
 occurs before Kubernetes access, including PVC or secret creation. Resource
 fields without the required capability are rejected. Legacy requests with
 neither the capability nor fields retain their previous behavior.
+
+With upstream `StartWorkloadRequest.flavor`, the runner validates the named
+catalog entry before creating any Kubernetes object. Explicit capability-gated
+container bounds take precedence over flavor defaults; a flavor supplies main
+and ordinary-sidecar bounds only where no explicit resources are present.
+`compute-resources` still requires complete explicit main bounds. Operator
+supporting bounds then cover any remaining containers, including init,
+restartable init and capability-injected containers. Flavor-only callers retain
+upstream behavior, including unsized init containers; they are not implicitly
+opted into the stricter capability. Unknown/invalid flavors fail even when
+explicit bounds were also supplied.
 
 Bounds are **per container**, not one shared task budget. Supporting-container
 allocations are additional to the main flavor. This does not limit the number
