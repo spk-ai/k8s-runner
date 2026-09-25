@@ -72,6 +72,8 @@ func New(options Options) *Server {
 	}
 }
 
+// Ready is a local process probe, not proof of overlay enrollment or storage
+// backend identity; callers must verify those independently.
 func (s *Server) Ready(_ context.Context, _ *runnerv1.ReadyRequest) (*runnerv1.ReadyResponse, error) {
 	return &runnerv1.ReadyResponse{Status: "ok"}, nil
 }

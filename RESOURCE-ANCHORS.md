@@ -1,5 +1,9 @@
 # Native Resource Anchors
 
+This guide preserves the original resource-anchor acceptance and integration
+gates. Use [README.md](README.md) for the rebased build dependency; the revisions,
+checklist and results below are historical, not current release acceptance.
+
 Native source and isolated Kubernetes acceptance pass on `feat/resource-anchors`,
 based on preparation observation `6fdcc41` and API `3b25d03` (base `d6449dd`).
 Registry/controller integration remains incomplete. Nothing is installed.
@@ -8,12 +12,9 @@ mixed-writer upgrade. Preserve the reviewed installed prepared/DNS stack.
 
 ## Contract Owners
 
-Metadata reservation and exact-owner revocation live in
-[resource_anchors.go](internal/server/resource_anchors.go).
-[anchored_workload.go](internal/server/anchored_workload.go) owns atomic Pod/PVC
-ownership and selection/activation CAS;
-[prepared_workload.go](internal/server/prepared_workload.go) owns gate/hold
-ordering and exact-Pod removal. Persistent volume owners outlive compute.
+Start at [resource_anchors.go](internal/server/resource_anchors.go),
+[anchored_workload.go](internal/server/anchored_workload.go) and
+[prepared_workload.go](internal/server/prepared_workload.go) for native contracts.
 
 Registry persistence must precede native creation authority. Labels and backend
 IDs are assertions, not caller authentication. A same-name owner is not a
@@ -21,21 +22,15 @@ replacement for a persisted UID, and owner absence is not child cleanup evidence
 
 ## Implementation And Acceptance Checklist
 
-- [x] Additive reservation/anchored-prepare/removal API and native handlers.
-- [x] Exact immutable ConfigMap owner identity and scoped chart RBAC.
-- [x] Atomic Pod/PVC ownership, bound workspace reuse and legacy rejection.
-- [x] Unit/race tests for late writes, wrong owners/UIDs, missing/replaced
-      anchors, first/existing/zero-volume workspaces and compute/volume lifetimes.
-- [x] Real Kubernetes delayed-create and GC acceptance with exact UID checks.
+Native acceptance is recorded below. Remaining integration gates at that revision:
+
 - [ ] Registry persistence and all-writer guards before native write authority.
 - [ ] Agent/sandbox controller migration and interrupted preparation recovery.
 - [ ] Checked volume retirement and stale-create cleanup without workspace loss.
 - [ ] Coordinated DNS-compatible A2A/agent rollout and production enforcement.
 
-The API is distinct from legacy preparation, so unsupported servers cannot
-silently omit ownership. No timeout, NotFound check or read-then-create alone
-proves an in-flight Kubernetes request cannot commit later. This design uses
-retained owner incarnations and gated execution, not such an assumption.
+Do not treat a timeout, NotFound check or read-then-create as proof that an
+in-flight Kubernetes request cannot commit later.
 
 Kubernetes documents same-namespace [owner references](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/),
 asynchronous [garbage collection](https://kubernetes.io/docs/concepts/architecture/garbage-collection/)

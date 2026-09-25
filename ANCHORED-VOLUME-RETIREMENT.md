@@ -1,10 +1,12 @@
 # Anchored Volume Retirement
 
+This guide records the original anchored-retirement proposal and historical
+acceptance. See [README.md](README.md) for the rebased build dependency.
+
 Dependent on the matching API `feat/anchored-volume-removal` branch and native
 resource anchors. This source proposal is not installed or a drop-in release.
 
-The exact PVC/owner target, retirement marker, holds and separate absence checks
-live beside `RemoveVolumeAnchored` in
+See `RemoveVolumeAnchored` in
 [anchored_volume_removal.go](internal/server/anchored_volume_removal.go).
 The controller must first persist retirement intent and exclude admission.
 Ordinary between-turn compute release retains storage. Current ABSENT evidence
@@ -13,9 +15,8 @@ does not promise that no delayed child can appear.
 ## Verification
 
 The full source race suite passes 636 test entries, with seven explicitly gated
-live/child skips. Fake-client cases cover target validation, workload/finalizer
-holds, lost marker/PVC/owner acknowledgements, immutable retirement targets,
-preparation rejection and separate PVC/owner absence.
+live/child skips. Fake-client cases live in
+[anchored_volume_removal_test.go](internal/server/anchored_volume_removal_test.go).
 
 Two real Kubernetes scenarios plus their parent pass under:
 

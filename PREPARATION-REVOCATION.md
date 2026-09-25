@@ -4,20 +4,19 @@ Dependent proposal for interrupted first provisioning, requiring the matching
 API, registry and controller changes. It is not an installed or standalone
 production capability.
 
-The activation/revocation conflict, durable journal and complete cleanup partition
-live beside `RevokeWorkloadPreparation` and `ObservePreparationRevocation` in
-[preparation_revocation.go](internal/server/preparation_revocation.go).
-[anchored_workload.go](internal/server/anchored_workload.go) owns activation's
-claim on the same workload anchor.
+See [preparation_revocation.go](internal/server/preparation_revocation.go) and
+[anchored_workload.go](internal/server/anchored_workload.go) for native contracts.
 
-Background owner deletion is not immediate child deletion. Late CREATEs can
-still commit; the revoked owner excludes old activation, while durable volume
-ownership and registry UID checks preserve the workspace. This is not generic
-future-write or node fencing. Journals are retained indefinitely for now;
+Background owner deletion is not immediate child deletion or generic
+future-write/node fencing. Reconcile late children without discarding persistent
+workspaces. Journals are retained indefinitely for now;
 authenticated all-writer enforcement and a safe retention policy are required
 before broader deployment. Existing repository licensing is unchanged.
 
 ## Verification
+
+Historical revocation-branch evidence follows; use [README.md](README.md) for
+the rebased build dependency.
 
 On 2026-09-15 the source race suite passed 678 test entries with seven explicitly
 gated live/helper skips. Build and vet passed. The native opt-in run passed all

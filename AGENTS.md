@@ -1,22 +1,18 @@
 # k8s-runner Contribution Guide
 
 ## Owners
-- `internal/server/volume_anchor_adoption.go`: original-PVC adoption journal.
-- `internal/server/{resource_anchors,anchored_workload,prepared_workload}.go`:
-  owner UIDs, gated preparation, activation and exact-Pod removal.
-- `internal/server/{prepared_observation,prepared_inspection,preparation_revocation}.go`:
-  read-only evidence and interrupted-preparation revocation.
-- `internal/server/{volume_backend,volume_removal,anchored_volume_removal,pvc}.go`:
-  backend identity, checked retirement and persistent claim reuse.
-- `charts/k8s-runner/` and README own operator RBAC/network/quota configuration.
+Use [README.md](README.md) for rollout boundaries and links to owning source;
+discover declarations and adjacent tests under `internal/server/`. Operator
+configuration belongs in [chart values](charts/k8s-runner/values.yaml), not a
+second configuration inventory in Markdown.
 
 ## Documentation
 - Keep implementation invariants beside their handwritten Go or protobuf owner.
   Update those comments and focused tests when behavior changes; Markdown holds
   operations, cross-repository decisions, security boundaries and dated evidence.
-- Start at `docs/catalog.json`. Maintain its version-1 document entries
-  (`id`, `path`, `title`, `purpose`, `kind`) for meaningful Markdown and
-  `AGENTS.md` only, using repository-relative paths. Do not index generated code.
+- Start at `docs/catalog.json`; update it when a guide's path or purpose changes.
+  Keep meaningful Markdown and `AGENTS.md` discoverable using repository-relative
+  paths. Do not index generated code.
 - When a compatible structural navigator is available, discover repositories and
   components first, then batch-inspect selected owners and their related tests.
   Otherwise use native declarations, imports, RPC types and adjacent tests;

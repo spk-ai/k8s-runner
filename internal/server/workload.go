@@ -118,6 +118,8 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, err
 	}
 	hostUsers := capabilityPlan.apply(&containers, &initContainers, &volumes, &sidecarNames)
+	// Keep flavor-only requests compatible with upstream; sizing init/injected
+	// containers is an explicit compute-resources opt-in.
 	if capabilityPlan.computeResources {
 		applySupportingResources(containers, initContainers, supportingResources)
 	}

@@ -11,12 +11,8 @@ yet contain this proposal.
 
 ## Contract Owners
 
-The four adoption handlers in
-[volume_anchor_adoption.go](internal/server/volume_anchor_adoption.go) own
-metadata reservation, journal UID pinning, original-PVC/spec validation,
-conditional apply and separate finalization. Ordinary reuse is guarded by
-[validatePVCReuseSpec](internal/server/pvc.go).
-No adoption operation allocates storage, supplies credentials or executes a turn.
+See [volume_anchor_adoption.go](internal/server/volume_anchor_adoption.go) and
+[pvc.go](internal/server/pvc.go) for native adoption and reuse contracts.
 
 ## Recovery Boundary
 
@@ -27,11 +23,9 @@ fencing. Registry adoption fields, SQL guards and the coordinator are separate
 required work. Existing allocation reservations must not be fabricated for
 migrated storage.
 
-If an owner disappears after attachment, Kubernetes may request dependent PVC
-deletion. The adoption hold retains that original claim and backing volume;
-native recovery refuses the now-missing owner rather than removing the hold or
-creating a replacement. This is retention for operator reconciliation, not an
-automatic recovery of a terminating PVC. See Kubernetes' [finalizer semantics](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
+Owner loss after attachment can leave a terminating PVC under an adoption hold.
+Retain it for operator reconciliation; removing the hold or creating a replacement
+is not recovery of that original workspace. See Kubernetes' [finalizer semantics](https://kubernetes.io/docs/concepts/overview/working-with-objects/finalizers/)
 and [owner garbage collection](https://kubernetes.io/docs/concepts/architecture/garbage-collection/).
 
 The journal is retained indefinitely for now. Authenticated callers, old-writer
@@ -40,6 +34,8 @@ coordinated rollout remain release gates. Completed-turn recovery does not prove
 an interrupted executed turn can safely be retried.
 
 ## Verification
+
+The results below are historical native acceptance, not a rerun of the rebased stack.
 
 On 2026-09-15, the ordinary and unfiltered race suites each passed 838 test
 entries with seven opt-in live/helper skips. Build and unfiltered vet passed.
@@ -61,17 +57,11 @@ GOMAXPROCS=4 go test ./internal/server \
   -run '^TestLivePreparedWorkloads/volume-adoption-' -count=1 -timeout=13m
 ```
 
-The focused fake API evaluates actual JSON Patch tests and advances revisions.
-It covers invalid/changed receipts, missing/replaced resources, incomplete Pod
-inventory, active references and holds, lost replies at all six writes, CAS
-conflicts without retargeting, partial metadata and existing workload reuse.
-
-The opt-in fixture uses the chart's restricted service account, loopback gRPC,
-a unique namespace, network-denied resource-bounded Node Pods and fresh 1 MiB
-workspaces. Both agent and sandbox owner kinds run normal adoption, six actual
-SIGKILL checkpoints and owner-GC retention. Successful adoption is followed by
-a distinct Pod reading the original file and confirmed compute removal. These
-are model-free native tests, not a registry/A2A/provider deployment test.
+The [fake-client tests](internal/server/volume_anchor_adoption_test.go) and
+[native fixture](internal/server/prepared_workload_live_test.go) own the scenario
+matrix. Native reproduction requires an explicitly authorized disposable cluster
+with namespace/RBAC creation and service-account impersonation rights. It is not
+a registry/A2A/provider deployment test.
 
 Cleanup validates exact test ownership. The owner-GC scenarios explicitly remove
 only the new fixture's sole adoption hold after proving native retention; all

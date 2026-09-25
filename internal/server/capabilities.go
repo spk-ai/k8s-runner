@@ -235,6 +235,8 @@ func dockerSidecarContainer(implementation config.DockerImplementation) corev1.C
 	env := []corev1.EnvVar{{Name: dockerTLSCertDirEnvName, Value: dockerTLSCertDirDisabledValue}}
 	switch implementation {
 	case config.DockerImplementationRootless:
+		// rootlesskit/newuidmap need privilege escalation; nested runc also
+		// needs an unmasked /proc to set up its own container mounts.
 		allowPrivilegeEscalation := true
 		seccompProfile := &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeUnconfined}
 		appArmorProfile := &corev1.AppArmorProfile{Type: corev1.AppArmorProfileTypeUnconfined}
@@ -244,6 +246,7 @@ func dockerSidecarContainer(implementation config.DockerImplementation) corev1.C
 			Image: dockerRootlessImage,
 			Env:   env,
 			VolumeMounts: []corev1.VolumeMount{
+				// Mount the parent so dockerd creates and owns its docker/ data root.
 				{Name: dockerDataVolumeName, MountPath: dockerRootlessDataMountPath},
 				{Name: dockerRunVolumeName, MountPath: dockerRootlessRunMountPath},
 				{Name: dockerTunVolumeName, MountPath: dockerTunDevicePath},
