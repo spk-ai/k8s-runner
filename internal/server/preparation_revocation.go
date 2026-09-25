@@ -155,6 +155,11 @@ func (s *Server) validateRevocationPod(pod *corev1.Pod, expected *runnerv1.Prepa
 	return nil
 }
 
+// RevokeWorkloadPreparation competes with activation on the exact owner UID/revision.
+// Any activation claim fails closed even with no Pod. Match the immutable journal
+// before deleting the owner; its UID identifies the receipt, not a Pod. Missing
+// ownership without that evidence cannot retroactively prove revocation.
+// @see runners::internal/server/preparation_revocation
 func (s *Server) RevokeWorkloadPreparation(ctx context.Context, req *runnerv1.RevokeWorkloadPreparationRequest) (*runnerv1.RevokeWorkloadPreparationResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "preparation_revocation_intent_required")
@@ -256,6 +261,11 @@ func (s *Server) RevokeWorkloadPreparation(ctx context.Context, req *runnerv1.Re
 	return &runnerv1.RevokeWorkloadPreparationResponse{Revocation: receipt}, nil
 }
 
+// ObservePreparationRevocation reads the exact journal. POD_ABSENT requires observed
+// owner/Pod absence and a complete disjoint found/absent PVC partition. Changed,
+// held, deleting or Lost claims remain unresolved. Neither revocation RPC mutates
+// PVCs, strips holds or executes work; late children retain original owner UIDs.
+// @see orchestrator::internal/reconciler/preparation_revocation
 func (s *Server) ObservePreparationRevocation(ctx context.Context, req *runnerv1.ObservePreparationRevocationRequest) (*runnerv1.ObservePreparationRevocationResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "preparation_revocation_receipt_required")

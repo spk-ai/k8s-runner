@@ -16,6 +16,13 @@ import (
 const preparationRecoveryAnnotation = "agyn.io/preparation-recovery"
 const preparationRecoveryVersion = "pod-owned-secrets/v1"
 
+// ObserveWorkloadPreparation discovers a lost reply for retirement only. Require
+// gated, unscheduled, unexecuted compute with the atomic Pod-owned Secret marker;
+// validate every named claim and bounded owner labels across stable Pod/backend
+// reads without mutations or Secret reads. The controller must persist REMOVING
+// and this binding before cleanup. NotFound/Unimplemented and old ownership
+// semantics do not release admission or permit another preparation.
+// @see orchestrator::internal/reconciler/prepared_recovery
 func (s *Server) ObserveWorkloadPreparation(ctx context.Context, req *runnerv1.ObserveWorkloadPreparationRequest) (*runnerv1.ObserveWorkloadPreparationResponse, error) {
 	if !validPreparedID(req.GetWorkloadId()) || !validPreparedBackend(req.GetBackendId()) {
 		return nil, status.Error(codes.InvalidArgument, "preparation_intent_and_backend_required")

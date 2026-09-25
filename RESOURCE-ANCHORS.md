@@ -6,34 +6,18 @@ Registry/controller integration remains incomplete. Nothing is installed.
 This is a dependent capability proposal, not production readiness or a safe
 mixed-writer upgrade. Preserve the reviewed installed prepared/DNS stack.
 
-## Required Ordering
+## Contract Owners
 
-1. Reserve native metadata-only workload and volume anchors and persist their
-   exact backend/owner/UIDs in the durable registry before authorizing creation.
-2. Anchored preparation receives those exact UIDs. Each gated Pod is owned by
-   its workload anchor in CREATE. Every PVC is owned by its separate persistent
-   volume anchor in CREATE. Credentials stay owned by their exact Pod.
-3. Select exactly one Pod UID on its workload anchor with a UID/revision-checked
-   metadata PATCH before credentials. Claim activation on that same anchor
-   before sending any gate PATCH. Revocation DELETE uses the same UID/revision:
-   either revocation wins, or it must observe/retire the activation's exact Pod.
-   Check anchor identity at creation/activation boundaries. A revoked/replaced
-   anchor never authorizes retargeting or retry.
-4. For unexecuted preparation, durable retirement excludes new activation before
-   workload-anchor removal. A delayed Pod CREATE still references the deleted
-   UID, stays gated and is subject to Kubernetes GC. Observe child cleanup; an
-   anchor's absence alone is not physical workload/credential absence.
-5. For any potentially activated Pod, retain exact-Pod removal and side-effect
-   reconciliation before anchor revocation. Never infer no execution from GC.
-6. Retain volume anchors and PVCs across turns. Their eventual deletion requires
-   the checked volume lifecycle and a separate anchored-removal contract, not
-   the workload-anchor removal RPC.
+Metadata reservation and exact-owner revocation live in
+[resource_anchors.go](internal/server/resource_anchors.go).
+[anchored_workload.go](internal/server/anchored_workload.go) owns atomic Pod/PVC
+ownership and selection/activation CAS;
+[prepared_workload.go](internal/server/prepared_workload.go) owns gate/hold
+ordering and exact-Pod removal. Persistent volume owners outlive compute.
 
-Reserving an anchor may be repeated only while the registry has not authorized
-resource creation. A matching existing anchor is metadata recovery, not startup
-replay. A later same-name anchor has a different UID and cannot replace a pinned
-generation. A lost reservation reply can leave metadata only, not compute or a
-workspace. Ownership labels and backend IDs are assertions, not authentication.
+Registry persistence must precede native creation authority. Labels and backend
+IDs are assertions, not caller authentication. A same-name owner is not a
+replacement for a persisted UID, and owner absence is not child cleanup evidence.
 
 ## Implementation And Acceptance Checklist
 

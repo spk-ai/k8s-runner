@@ -71,6 +71,12 @@ func (s *Server) RemoveVolumeChecked(context.Context, *runnerv1.RemoveVolumeChec
 	return nil, status.Error(codes.FailedPrecondition, "backend_bound_volume_removal_required")
 }
 
+// RemoveVolumeBound checks the durable unanchored target's backend and persistent
+// identity before UID/resource-version deletion. ACK/termination is PENDING; only
+// GET/NotFound is ABSENT. Anchored targets are refused even if absent. Conflicts
+// never retarget or strip finalizers; legacy deletion and remove_volumes cannot
+// bypass this contract.
+// @see orchestrator::internal/reconciler/checked_volumes
 func (s *Server) RemoveVolumeBound(ctx context.Context, req *runnerv1.RemoveVolumeBoundRequest) (*runnerv1.RemoveVolumeBoundResponse, error) {
 	expected := req.GetExpected()
 	if err := validateVolumeRemovalTarget(expected); err != nil {

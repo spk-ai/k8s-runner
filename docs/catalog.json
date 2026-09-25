@@ -1,0 +1,54 @@
+{
+  "version": 1,
+  "documents": [
+    {
+      "id": "readme",
+      "path": "README.md",
+      "title": "k8s-runner",
+      "purpose": "Repository entry point, development setup and integration context.",
+      "kind": "navigation"
+    },
+    {
+      "id": "agents",
+      "path": "AGENTS.md",
+      "title": "k8s-runner Contribution Guide",
+      "purpose": "Source ownership, living documentation and verification rules.",
+      "kind": "contribution"
+    },
+    {
+      "id": "volume-adoption",
+      "path": "VOLUME-ANCHOR-ADOPTION.md",
+      "title": "Existing Workspace Adoption",
+      "purpose": "Adoption rollout, backup/retention boundaries and original native acceptance.",
+      "kind": "operations"
+    },
+    {
+      "id": "resource-anchors",
+      "path": "RESOURCE-ANCHORS.md",
+      "title": "Native Resource Anchors",
+      "purpose": "Native anchor dependencies, security boundaries and dated acceptance.",
+      "kind": "verification"
+    },
+    {
+      "id": "prepared-workloads",
+      "path": "PREPARED-WORKLOADS.md",
+      "title": "Prepared Workloads",
+      "purpose": "Native preparation prerequisites, permissions and historical acceptance.",
+      "kind": "verification"
+    },
+    {
+      "id": "preparation-revocation",
+      "path": "PREPARATION-REVOCATION.md",
+      "title": "Preparation Revocation",
+      "purpose": "Revocation integration, retention limits and native acceptance evidence.",
+      "kind": "verification"
+    },
+    {
+      "id": "anchored-retirement",
+      "path": "ANCHORED-VOLUME-RETIREMENT.md",
+      "title": "Anchored Volume Retirement",
+      "purpose": "Retirement coordination and native cleanup acceptance boundaries.",
+      "kind": "verification"
+    }
+  ]
+}

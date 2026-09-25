@@ -2,6 +2,9 @@
 
 k8s-runner is the Kubernetes-native implementation of the RunnerService gRPC API.
 
+See [AGENTS.md](AGENTS.md) for source owners and contribution rules, and
+[docs/catalog.json](docs/catalog.json) for operational and historical documents.
+
 The `sync/2026-09-24-volume-adoption` branch rebases the tested contribution
 stack onto upstream `3bd3355`. Generate from `spk-ai/api` `c21440b` on
 `sync/2026-09-24-volume-adoption`, which includes upstream flavor contracts and
@@ -18,11 +21,9 @@ Architecture: [k8s-runner](https://github.com/agynio/architecture/blob/main/arch
 
 ## Volume Inventory Integrity
 
-`ListVolumes` returns `FailedPrecondition` without a partial response if any
-runner-managed PVC has a missing, empty, whitespace-padded or duplicate
-`volume_key`. A successful inventory is used by reconcilers as evidence that
-unlisted volumes are absent, so silently omitting malformed managed claims can
-incorrectly close a retained workspace's record. Unmanaged PVCs remain excluded.
+Complete-inventory rejection and persistent identity projection live beside
+`ListVolumes` in [query.go](internal/server/query.go). A partial inventory is
+not usable absence evidence.
 
 This changes the former skip-missing-key behavior. A damaged inventory requires
 operator ownership reconciliation before volume reconciliation can proceed;
@@ -35,24 +36,12 @@ After generating the APIs, run `go test -race ./...`. Focused tests are
 
 ## Volume Backend Identity
 
-This dependent proposal requires the backend-identity API extension. Inventory
-and checked removal now identify the storage scope as
-`kubernetes-namespace/v1/<namespace-name>/<namespace-uid>`. The UID comes from
-the Kubernetes API, never configuration, a caller header or the expected target.
-[Kubernetes object IDs](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids)
-distinguish a namespace from another incarnation using the same name.
-
-The runner reads that identity before and after inventory/deletion observations.
-A missing, terminating, inaccessible or replaced namespace cannot establish PVC
-absence. Existing PVC UID/resource-version deletion preconditions remain in use.
-Ordinary namespace metadata updates and runner restarts preserve the identity.
-Both inventory envelopes and removal responses carry the observed identity;
-the controller/registry must pin and validate it, including empty inventory.
-
-Deletion uses the separate `RemoveVolumeBound` RPC so older runners answer
-`Unimplemented` without reaching a handler that ignores the new precondition.
-This runner refuses `RemoveVolumeChecked` before any Kubernetes access. Callers
-must never fall back to that older method or name-only deletion.
+Storage-scope identity and before/after checks live beside `volumeBackendID` in
+[volume_backend.go](internal/server/volume_backend.go). Exact unanchored deletion
+and legacy rejection live beside `RemoveVolumeBound` in
+[volume_removal.go](internal/server/volume_removal.go).
+The backend-identity API extension and all consumers must be coordinated;
+a different namespace UID is not evidence that an original PVC disappeared.
 
 When `rbac.create=true`, the chart adds a separate ClusterRole/Binding granting
 only `get` on the named `workloadNamespace` object. It grants no namespace list,
@@ -70,20 +59,12 @@ cluster identities or perform a rollout/adoption. It is not a drop-in upgrade.
 
 ## Checked Volume Removal
 
-This branch requires the proposed checked-volume API. `ListVolumes` additionally
-returns each PVC UID and only persistent identity labels; workload/turn labels
-and unrelated metadata are not included in that identity.
-
-`RemoveVolumeBound` validates the durable expected name, key, UID and complete
-persistent ownership labels against a fresh GET, then uses that UID and the GET's
-resource version as Kubernetes delete preconditions. It refuses missing identity,
-foreign/replacement claims and claims with owner references. Conflicts are not
-retried against a different target. A terminating claim or DELETE acknowledgement
-returns `PENDING`; only GET/NotFound returns `ABSENT`. It never clears finalizers.
-
-Legacy `RemoveVolume` returns `FailedPrecondition`. So does
-`RemoveWorkload(remove_volumes=true)`, before touching a Pod, Secret or PVC.
-There is no compatibility escape flag. Ordinary workload removal retains disks.
+The native target, conditional delete and PENDING/ABSENT contracts live in
+[volume_removal.go](internal/server/volume_removal.go); anchored PVC/owner
+retirement lives in
+[anchored_volume_removal.go](internal/server/anchored_volume_removal.go).
+Legacy deletion and `remove_volumes=true` cannot bypass these paths.
+Ordinary workload removal retains disks.
 Deploy only after coordinating the API, durable registry intents and every
 orchestrator/sandbox cleanup caller. This branch is not a stock-image drop-in.
 
@@ -338,24 +319,13 @@ Custom callers must set a stable, owner-specific key before upgrading; a key
 derived from a transient Pod/workload ID would break workspace continuation.
 Unkeyed named-volume requests are now rejected, even if that claim exists.
 
-An existing claim must retain the same key, runner/orchestrator management
-labels, and any agent-instance, agent-class, sandbox or sandbox-owner labels.
-Per-volume labels cannot override conflicting workload ownership labels.
-Per-start workload IDs and thread IDs do not participate in ownership matching.
-Missing or conflicting identity returns `FailedPrecondition` before Pod creation;
-the runner never adopts, relabels, renames or deletes the conflicting claim.
-Legacy claims missing identity require an audited operator reconciliation, not
-automatic backfilling or a new empty workspace.
-
-Validation applies to an ordinary lookup, a successful creation response and a
-fresh lookup after a competing create returns `AlreadyExists`. Uncertain API
-errors are returned, not treated as absence or permission to recreate storage.
-Deleting/lost claims and claims with garbage-collection owner references are
-rejected. Reuse requires a filesystem, compatible single-node/single-Pod access
-mode, sufficient requested capacity and a matching explicitly selected storage
-class. An unspecified class retains the cluster's original choice. Larger
-claims are preserved without resizing. Pending claims are permitted because
-binding may require the workload to be scheduled first.
+Persistent owner/key and storage compatibility checks live beside
+`validatePVCReuseSpec` in [pvc.go](internal/server/pvc.go).
+Prepared bindings are validated in
+[prepared_workload.go](internal/server/prepared_workload.go);
+[volume_anchor_adoption.go](internal/server/volume_anchor_adoption.go) owns
+explicit existing-PVC migration. Legacy claims missing identity require audited
+operator reconciliation, not relabeling or a new empty workspace.
 
 These checks do not authenticate RPC callers, fence old workloads or prevent a
 privileged writer from replacing a claim after validation. `ReadWriteOnce` is

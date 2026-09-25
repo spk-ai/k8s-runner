@@ -3,24 +3,12 @@
 Dependent on the matching API `feat/anchored-volume-removal` branch and native
 resource anchors. This source proposal is not installed or a drop-in release.
 
-The new `RemoveVolumeAnchored` handler retires an exact bound PVC and its
-persistent ConfigMap owner. The controller must first persist retirement intent
-and exclude workload admission. Ordinary between-turn release still retains
-the PVC and volume owner.
-
-The handler validates the backend incarnation, complete identity labels and
-owner UID before any mutation. A workload hold returns PENDING without mutation.
-An atomic UID/resourceVersion-checked owner patch records the retiring PVC UID;
-both previous and current preparation readers reject the non-active owner.
-PVC deletion is conditional on its original UID and observed resourceVersion.
-A later read must confirm PVC absence before conditional owner deletion. Only
-independent absence observations of both objects produce ABSENT.
-
-Unknown first provision, changed active identities, foreign ownership and
-unsupported wire fields fail closed. A different-UID late child of the revoked
-owner is never adopted or deleted by its discovered UID. The handler waits for
-owner-based collection. Replaced owners are not cleanup targets. An observed
-ABSENT is not a promise that no delayed child can appear in the future.
+The exact PVC/owner target, retirement marker, holds and separate absence checks
+live beside `RemoveVolumeAnchored` in
+[anchored_volume_removal.go](internal/server/anchored_volume_removal.go).
+The controller must first persist retirement intent and exclude admission.
+Ordinary between-turn compute release retains storage. Current ABSENT evidence
+does not promise that no delayed child can appear.
 
 ## Verification
 

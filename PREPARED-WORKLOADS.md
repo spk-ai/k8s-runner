@@ -5,87 +5,39 @@ Dependent preparation-observation implementation on atomic-Secret runner
 API, based on inspection API `24b73ca`. It is not a drop-in image for installed
 controllers. No installed platform deployment changes in these fixtures.
 
-## Native Contract
+## Contract Owners
 
-- `PrepareWorkload` requires a canonical workload UUID and expected backend.
-  Existing volume bindings are read-only inputs: a missing or replaced bound
-  claim is never recreated. New volumes use the existing ownership/spec checks.
-  All named volumes appear in the returned binding, not just main's mounts.
-- The Pod starts with `agyn.io/workload-binding` in `spec.schedulingGates`.
-  Its annotation stores backend/workload/volume identities, not credentials.
-  Kubernetes >=1.30 is verified before resource creation; Pod creation requests
-  strict field validation. Trusted admission must preserve the gate.
-- The gated Pod starts in native `preparing` state. Temporary Secrets are staged
-  in memory until its UID is confirmed, then created with that exact Pod owner
-  in the CREATE itself. A crash cannot interrupt a separate ownership PATCH.
-  After every Secret CREATE is acknowledged and validated, a Pod UID/resource-
-  version checked PATCH commits `prepared` state without removing its gate.
-  Incomplete setup cannot activate; failed/uncertain Pod creation writes no
-  credentials. Kubernetes GC owns even delayed credential writes after Pod
-  removal. No prepared-path name-only Secret deletion or adoption is used.
-- The caller must persist/verify the binding before `ActivateWorkload`.
-  Activation checks exact Pod/backend/claim identity, applies a per-Pod
-  `agyn.io/workload-<pod-uid>` finalizer to every claim, and only then removes its
-  gate with Pod UID/resource-version preconditions. Other gates/finalizers stay.
-  Another Pod's hold prevents concurrent activation on the same claim.
-- Successful deletion and lost replies do not release holds. Only a later
-  `RemovePreparedWorkload` observing the original Pod absent can remove its own
-  holds. It never removes another controller's finalizer or deletes a PVC.
-  An activation never creates a Pod, so a delayed gate patch cannot activate a
-  same-name replacement after the original UID is gone.
-- Repeating activation on the same already-active binding is read-only. It is
-  not permission to replay a task message or repeat uncertain preparation.
-  JSON-Patch revision conflicts can surface as InvalidArgument or Aborted; the
-  immutable activation may be retried, not retargeted.
-- Legacy Stop/Remove reject prepared Pods. Legacy Start rejects held claims,
-  but is otherwise still available. Drain/migrate all writers and enforce access
-  before using the new path for production isolation. Never fall back on
-  Unimplemented; distinct RPCs prevent old servers ignoring new preconditions.
+[prepared_workload.go](internal/server/prepared_workload.go) owns gated preparation,
+atomic Pod-owned credential setup, exact activation and hold-aware removal.
+[anchored_workload.go](internal/server/anchored_workload.go) owns native anchor
+selection and activation claims; [pvc.go](internal/server/pvc.go) owns claim reuse.
+
+Deployment requires Kubernetes >=1.30, strict Pod-create validation, gate-aware
+schedulers and trusted admission preserving identity and gates. Drain/migrate
+all writers and coordinate registry/controller/native/API versions. Distinct
+RPCs must fail closed on Unimplemented; legacy methods are not a safe fallback.
 
 ## Read-Only Inspection
 
-`InspectPreparedWorkload` takes the stored complete workload binding. It checks
-the backend, Pod UID, original binding annotation, named claim set, claim UIDs
-and owner labels. Active Pods require their existing claim holds; inspection
-never repairs holds or removes a scheduling gate. An unactivated Pod must not
-be scheduled or have evidence of container execution. Two Pod reads must retain
-the same resource version. A concurrent change requires another read-only
-attempt, not activation as a probe or a name-only fallback.
-
-The response reports the validated Pod snapshot, native activation state,
-deletion-pending flag and resource version. Activation is not container readiness.
-This is not an atomic multi-resource snapshot, authenticated receipt, recovery
-of an unknown prepare intent, or node/storage fencing.
-
-Native `preparing` is not inspectable as a completed prepared workload. The
-separate preparation-observation contract below permits retirement discovery,
-not inference of setup completion or authority to replay preparation.
+The read-only known-binding and stable-snapshot contract lives beside
+`InspectPreparedWorkload` in
+[prepared_inspection.go](internal/server/prepared_inspection.go).
+Activation is not readiness; inspection is not an atomic multi-resource snapshot,
+authenticated receipt or node/storage fence. Incomplete preparation has its
+separate retirement-discovery path below.
 
 Inspection adds no RBAC mutation rights. The focused tests assert GET-only
 Kubernetes actions for successful, conflicting and failed inspections.
 
 ## Lost Preparation Observation
 
-`ObserveWorkloadPreparation` takes the original workload intent UUID and backend
-ID. It returns an exact binding only for a gated, unscheduled Pod in `preparing`
-or `prepared` state, with no current or prior container execution, including
-init and ephemeral containers. Pod creation now records the atomic-credential
-contract marker `agyn.io/preparation-recovery=pod-owned-secrets/v1`. Older Pods
-without this marker are refused because their Secrets may have been ownerless.
-
-The method checks the Pod's stored intent, actual UID, all named claim UIDs and
-owners, non-deleting/non-lost claims, stable Pod resource version across two
-reads, and backend identity before and after inspection. Only manager and
-agent/instance/thread or sandbox/owner labels are returned. No Secret read/list,
-Kubernetes mutation, activation or name-only removal occurs. This remains a
-checked observation, not an atomic multi-resource snapshot or signed receipt.
-
-The controller must durably enter REMOVING, validate the full owner and volume
-set, persist checked volume/workload bindings and retire that exact Pod through
-the existing removal API. A pending Pod deletion is observable; native absence
-is not. NotFound and Unimplemented retain admission and never permit another
-prepare. In particular, initially absent and delayed Pod/PVC creation remain
-unresolved rather than being reported safe to retry.
+The gated, unexecuted, atomic-Secret-ownership discovery contract lives beside
+`ObserveWorkloadPreparation` in
+[prepared_observation.go](internal/server/prepared_observation.go).
+The controller must persist retirement authority and validate durable identities
+before cleanup. No missing outcome authorizes another preparation; late creation,
+old ownerless Secrets and authenticated all-writer enforcement need separate
+reconciliation. The evidence below retains its original observation-only scope.
 
 On 2026-09-15, the full native race suite passes 551 test entries, with seven
 opt-in/child entries skipped outside their gates; build and unfiltered vet pass.

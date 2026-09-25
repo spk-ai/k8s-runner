@@ -91,6 +91,11 @@ func (s *Server) ListWorkloadsByVolume(ctx context.Context, req *runnerv1.ListWo
 	return &runnerv1.ListWorkloadsByVolumeResponse{TargetIds: ids}, nil
 }
 
+// ListVolumes rejects missing, padded or duplicate keys across managed claims
+// instead of returning partial absence evidence. Unmanaged PVCs remain excluded.
+// Each item carries persistent owner/UID identity; the envelope pins the live
+// backend even when empty. Inventory is not deletion or adoption authority.
+// @see orchestrator::internal/reconciler/volume_reconcile
 func (s *Server) ListVolumes(ctx context.Context, _ *runnerv1.ListVolumesRequest) (*runnerv1.ListVolumesResponse, error) {
 	backend, err := s.volumeBackendID(ctx)
 	if err != nil {

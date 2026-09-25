@@ -9,38 +9,14 @@ branch `sync/2026-09-24-volume-adoption`, including upstream flavor contracts.
 Generate the native stubs from that checkout; the published BSR module does not
 yet contain this proposal.
 
-## Native Transition
+## Contract Owners
 
-`ReserveVolumeAnchorAdoption` accepts a canonical operation UUID, complete
-unanchored checked volume and matching owner intent. The PVC must be Bound,
-retain its original UID/name/identity, have no workload holds and have no Pod
-references in a complete versioned namespace inventory. Terminal, deleting and
-unmanaged Pods count as references. It does not mutate the PVC.
-
-The reservation creates an immutable volume-owner ConfigMap marked
-`volume-adopting-v1`, then an immutable `volume-adoption-<volume-id>` journal.
-The owner intent pins the operation, original PVC and its native spec SHA-256.
-An owner UID/resource-version PATCH pins the journal UID before a reservation
-is acknowledged. A missing pinned journal cannot be recreated on retry.
-
-`ApplyVolumeAnchorAdoption` verifies the entire receipt, rechecks drain and
-atomically attaches owner references, receipt/state annotations and
-`agyn.io/workload-adopt-<operation-id>` using PVC UID/resource-version tests.
-The hold belongs to the existing workload-hold namespace so retirement retains
-it; ordinary workload cleanup cannot own its non-Pod suffix. The PVC spec and
-unrelated labels, annotations and finalizers are preserved.
-
-`FinalizeVolumeAnchorAdoption` is separate from persisting the applied binding.
-It changes the owner to active metadata, re-observes the original storage and
-drain, then atomically marks the PVC ready and removes only its own hold. An
-active owner with an applied/held PVC still fails ordinary reuse. Incomplete
-adoption annotations and foreign adoption holds also fail closed.
-
-`ObserveVolumeAnchorAdoption` never mutates anything. The exact journal, owner,
-PVC/backend identities and original spec must match. A repeated finalization
-is read-only after readiness is observed; a lost write response is not success.
-No adoption RPC creates/deletes a PVC or Pod, supplies credentials, resizes data,
-relabels an owner, or dispatches an agent turn.
+The four adoption handlers in
+[volume_anchor_adoption.go](internal/server/volume_anchor_adoption.go) own
+metadata reservation, journal UID pinning, original-PVC/spec validation,
+conditional apply and separate finalization. Ordinary reuse is guarded by
+[validatePVCReuseSpec](internal/server/pvc.go).
+No adoption operation allocates storage, supplies credentials or executes a turn.
 
 ## Recovery Boundary
 

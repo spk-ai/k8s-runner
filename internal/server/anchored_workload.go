@@ -104,6 +104,10 @@ func (s *Server) requireBindingAnchors(ctx context.Context, binding *runnerv1.Wo
 	return nil
 }
 
+// claimAnchorPod serializes selection, activation and revocation on one workload
+// owner UID/resource version. Select before credentials; claim activation before
+// gate writes. A consumed/revoked owner cannot authorize a replacement, and lost
+// acknowledgements never justify changing the pinned Pod UID.
 func (s *Server) claimAnchorPod(ctx context.Context, binding *runnerv1.WorkloadBinding, activation bool) error {
 	if binding.Anchor == nil {
 		return nil
@@ -147,6 +151,11 @@ func (s *Server) claimAnchorPod(ctx context.Context, binding *runnerv1.WorkloadB
 	return nil
 }
 
+// PrepareAnchoredWorkload requires previously persisted exact workload/volume
+// owners. Pod/PVC CREATEs carry separate owner UIDs atomically; credentials remain
+// Pod-owned. Delayed creation retains old ownership, never authorizing activation,
+// workspace replacement or fallback to unanchored preparation.
+// @see orchestrator::internal/reconciler/prepared_start
 func (s *Server) PrepareAnchoredWorkload(ctx context.Context, req *runnerv1.PrepareAnchoredWorkloadRequest) (*runnerv1.PrepareAnchoredWorkloadResponse, error) {
 	p := req.GetPreparation()
 	work := req.GetWorkloadAnchor()

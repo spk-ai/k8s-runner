@@ -90,6 +90,12 @@ func (s *Server) PrepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkl
 	return s.prepareWorkload(ctx, req, nil, nil)
 }
 
+// prepareWorkload creates gated compute. Expected PVCs are read-only identities;
+// missing/replaced bindings are not first provision. Return every named volume,
+// not just main's mounts. Strict Pod creation on Kubernetes >=1.30 and trusted
+// gate-preserving admission are prerequisites. Stage Secrets until the Pod UID is
+// known, then CREATE them with that owner; setup completion is a UID/revision
+// PATCH, not activation or permission to repeat an uncertain preparation.
 func (s *Server) prepareWorkload(ctx context.Context, req *runnerv1.PrepareWorkloadRequest, anchor *runnerv1.ResourceAnchor, anchors map[string]*runnerv1.ResourceAnchor) (*runnerv1.PrepareWorkloadResponse, error) {
 	workload := req.GetWorkload()
 	if workload == nil || !validPreparedID(workload.WorkloadId) || !validPreparedBackend(req.GetBackendId()) || len(workload.Volumes) > maxPreparedVolumes {
@@ -344,6 +350,12 @@ func preparedObjectPatch(meta metav1.ObjectMeta, changes ...preparedPatchOperati
 	return data
 }
 
+// ActivateWorkload requires the caller's durable complete binding. Claim anchored
+// activation, protect each exact PVC with this Pod UID's hold, then remove only
+// our gate with UID/resource-version tests. Another Pod's hold blocks activation.
+// Same-binding active retries never create compute or replay messages; failed/lost
+// writes retain holds until exact-Pod absence.
+// @see orchestrator::internal/reconciler/prepared_start
 func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWorkloadRequest) (*runnerv1.ActivateWorkloadResponse, error) {
 	expected, err := canonicalBinding(req.GetExpected())
 	if err != nil {
@@ -435,6 +447,11 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 	return &runnerv1.ActivateWorkloadResponse{Binding: expected}, nil
 }
 
+// RemovePreparedWorkload deletes only the bound Pod. DELETE success is PENDING;
+// later absence in the pinned backend permits releasing only this Pod's PVC holds.
+// PVCs and volume owners survive. ABSENT is not Secret-GC completion or node/storage
+// fencing; delayed holds still require reconciliation.
+// @see orchestrator::internal/reconciler/prepared_workloads
 func (s *Server) RemovePreparedWorkload(ctx context.Context, req *runnerv1.RemovePreparedWorkloadRequest) (*runnerv1.RemovePreparedWorkloadResponse, error) {
 	expected, err := canonicalBinding(req.GetExpected())
 	if err != nil {
