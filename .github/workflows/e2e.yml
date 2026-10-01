@@ -20,18 +20,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout pinned E2E tooling
+        uses: actions/checkout@v4
+        with:
+          repository: agynio/e2e
+          ref: 435b549a937129b6858e7314648eb690894209fe
+          path: .e2e-tooling
+          persist-credentials: false
+
+      - name: Prepare disposable VM image repair and diagnostics
+        run: python3 .github/e2e/prepare.py .e2e-tooling
+
       - name: Provision cluster
-        uses: agynio/e2e/.github/actions/provision-vm@main
+        uses: ./.e2e-tooling/.github/actions/provision-vm
+        with:
+          agyn-cli-version: v0.19.0
 
       - name: Setup DevSpace
-        uses: agynio/e2e/.github/actions/setup-devspace@main
+        uses: agynio/e2e/.github/actions/setup-devspace@435b549a937129b6858e7314648eb690894209fe
 
       - name: Deploy k8s-runner from source
         run: devspace run deploy
 
       - name: Run E2E tests
-        uses: agynio/e2e/.github/actions/run-tests@main
+        uses: agynio/e2e/.github/actions/run-tests@435b549a937129b6858e7314648eb690894209fe
         with:
+          e2e-ref: 435b549a937129b6858e7314648eb690894209fe
           service: k8s_runner
 
       - name: Restore ArgoCD sync

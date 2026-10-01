@@ -7,7 +7,9 @@ managed:
       value: github.com/agynio/k8s-runner/internal/.gen
 
 inputs:
-  - module: buf.build/agynio/api
+  - git_repo: https://github.com/spk-ai/api.git
+    ref: ce64da8680c39a13f7174c3146b38f3bfcc03037
+    subdir: proto
     paths:
       - agynio/api/runner/v1
       - agynio/api/runners/v1

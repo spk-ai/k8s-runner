@@ -11,6 +11,8 @@ RUN curl -sSL \
     chmod +x /usr/local/bin/buf
 
 FROM --platform=$BUILDPLATFORM golang:${GO_VERSION}-alpine AS build
+RUN apk add --no-cache git
+
 WORKDIR /src
 COPY --from=buf /usr/local/bin/buf /usr/local/bin/buf
 COPY go.mod go.sum ./
