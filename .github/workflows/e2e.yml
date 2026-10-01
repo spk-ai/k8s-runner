@@ -48,6 +48,10 @@ jobs:
           e2e-ref: 435b549a937129b6858e7314648eb690894209fe
           service: k8s_runner
 
-      - name: Restore ArgoCD sync
-        if: always()
-        run: devspace run restore-argocd
+      # The disposable VM is Helm-owned; there is no ArgoCD sync to restore.
+      - name: Collect source deployment diagnostics
+        if: failure()
+        run: |
+          kubectl get pods -n agyn-platform -l app.kubernetes.io/name=k8s-runner -o wide || true
+          kubectl describe pods -n agyn-platform -l app.kubernetes.io/name=k8s-runner || true
+          kubectl logs -n agyn-platform -l app.kubernetes.io/name=k8s-runner --all-containers --tail=100 || true

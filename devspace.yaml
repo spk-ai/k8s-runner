@@ -1,7 +1,7 @@
 version: v2beta1
 
 vars:
-  K8S_RUNNER_NAMESPACE: platform
+  K8S_RUNNER_NAMESPACE: agyn-platform
 
 functions:
   patch_deployment: |-
