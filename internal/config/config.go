@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -29,6 +30,7 @@ type Config struct {
 	ZitiEnrollmentTimeout        time.Duration
 	StorageClass                 *string
 	StorageSize                  string
+	WorkloadRuntimeClassName     string
 	LogLevel                     string
 	CapabilityImplementations    CapabilityImplementations
 	SupportingContainerResources *ComputeResources
@@ -64,6 +66,12 @@ func Load() (Config, error) {
 	cfg.Namespace = strings.TrimSpace(os.Getenv("KUBE_NAMESPACE"))
 	if cfg.Namespace == "" {
 		return Config{}, fmt.Errorf("KUBE_NAMESPACE is required")
+	}
+	cfg.WorkloadRuntimeClassName = strings.TrimSpace(os.Getenv("WORKLOAD_RUNTIME_CLASS_NAME"))
+	if name := cfg.WorkloadRuntimeClassName; name != "" {
+		if problems := validation.IsDNS1123Subdomain(name); len(problems) != 0 {
+			return Config{}, fmt.Errorf("invalid WORKLOAD_RUNTIME_CLASS_NAME: %s", strings.Join(problems, "; "))
+		}
 	}
 
 	var err error

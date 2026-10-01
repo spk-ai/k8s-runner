@@ -157,6 +157,9 @@ env:
     value: "info"
 envFrom: []
 extraEnvVars: []
+# Set WORKLOAD_RUNTIME_CLASS_NAME in extraEnvVars to require an operator-chosen
+# RuntimeClass for all workloads. Conflicting capability runtimes are rejected
+# before resource creation. Empty retains the existing runtime selection.
 extraEnvVarsCM: ""
 extraEnvVarsSecret: ""
 

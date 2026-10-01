@@ -148,6 +148,7 @@ func TestParseCapabilityImplementations(t *testing.T) {
 
 func setBaseEnv(t *testing.T) {
 	t.Helper()
+	t.Setenv("WORKLOAD_RUNTIME_CLASS_NAME", "")
 	t.Setenv("KUBE_NAMESPACE", "test-namespace")
 	t.Setenv("GRPC_ADDR", defaultGRPCAddr)
 	t.Setenv("PVC_STORAGE_SIZE", defaultStorageSize)
@@ -156,6 +157,26 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("GATEWAY_ADDRESS", defaultGatewayAddress)
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
 	t.Setenv("SUPPORTING_CONTAINER_RESOURCES", "")
+}
+
+func TestLoadWorkloadRuntimeClass(t *testing.T) {
+	for _, name := range []string{"", "kata-qemu", " kata.production ", "Invalid_Name", "../runtime"} {
+		t.Run(name, func(t *testing.T) {
+			setBaseEnv(t)
+			t.Setenv("WORKLOAD_RUNTIME_CLASS_NAME", name)
+			cfg, err := Load()
+			invalid := name == "Invalid_Name" || name == "../runtime"
+			if invalid {
+				if err == nil || !strings.Contains(err.Error(), "WORKLOAD_RUNTIME_CLASS_NAME") {
+					t.Fatalf("expected runtime validation failure, got %v", err)
+				}
+				return
+			}
+			if err != nil || cfg.WorkloadRuntimeClassName != strings.TrimSpace(name) {
+				t.Fatalf("runtime=%q error=%v", cfg.WorkloadRuntimeClassName, err)
+			}
+		})
+	}
 }
 
 func unsetEnv(t *testing.T, key string) {

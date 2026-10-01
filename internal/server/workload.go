@@ -66,6 +66,14 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	if err != nil {
 		return nil, err
 	}
+	// Runtime placement is operator policy, not caller metadata. Resolve it
+	// before creating credentials or volumes so conflicts have no side effects.
+	if name := s.workloadRuntimeClassName; name != "" {
+		if capabilityPlan.runtimeClassName != nil && *capabilityPlan.runtimeClassName != name {
+			return nil, status.Error(codes.FailedPrecondition, "capability_runtime_conflicts_with_workload_runtime")
+		}
+		capabilityPlan.runtimeClassName = ptr.To(name)
+	}
 	supportingResources, err := validateComputeResources(req, capabilityPlan.computeResources, s.supportingContainerResources)
 	if err != nil {
 		return nil, err

@@ -382,6 +382,55 @@ func TestStartWorkloadRejectsInvalidWorkloadID(t *testing.T) {
 	}
 }
 
+func TestStartWorkloadOperatorRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name, runtime, expected string
+		docker                  bool
+		conflict                bool
+	}{
+		{name: "unchanged default"},
+		{name: "ordinary workload", runtime: "isolated-tasks", expected: "isolated-tasks"},
+		{name: "existing capability", docker: true, expected: "kata-qemu"},
+		{name: "matching capability", docker: true, runtime: "kata-qemu", expected: "kata-qemu"},
+		{name: "conflicting capability", docker: true, runtime: "isolated-tasks", conflict: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client := fake.NewSimpleClientset()
+			srv := New(Options{Clientset: client, Namespace: "default", StorageSize: "1Gi", Logger: zap.NewNop(),
+				WorkloadRuntimeClassName:  tc.runtime,
+				CapabilityImplementations: config.CapabilityImplementations{Docker: config.DockerImplementationKataQemu}})
+			req := &runnerv1.StartWorkloadRequest{Main: &runnerv1.ContainerSpec{Name: "main", Image: "busybox"}}
+			if tc.docker {
+				req.Capabilities = []string{"docker"}
+			}
+			response, err := srv.StartWorkload(context.Background(), req)
+			if tc.conflict {
+				if status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("expected conflict, got %v", err)
+				}
+				if len(client.Actions()) != 0 {
+					t.Fatalf("conflict accessed Kubernetes: %v", client.Actions())
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod, err := client.CoreV1().Pods("default").Get(context.Background(), podNameFromID(response.Id), metav1.GetOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.expected == "" {
+				if pod.Spec.RuntimeClassName != nil {
+					t.Fatalf("unexpected runtime: %v", pod.Spec.RuntimeClassName)
+				}
+			} else if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != tc.expected {
+				t.Fatalf("expected runtime %q, got %v", tc.expected, pod.Spec.RuntimeClassName)
+			}
+		})
+	}
+}
+
 func TestStartWorkloadBuildsInitContainers(t *testing.T) {
 	clientset := fake.NewSimpleClientset()
 	server := New(Options{

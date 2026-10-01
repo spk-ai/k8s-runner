@@ -82,6 +82,7 @@ func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 			Logger:                       logger,
 			CapabilityImplementations:    cfg.CapabilityImplementations,
 			SupportingContainerResources: cfg.SupportingContainerResources,
+			WorkloadRuntimeClassName:     cfg.WorkloadRuntimeClassName,
 		}),
 	)
 	defer tcpServer.Stop()

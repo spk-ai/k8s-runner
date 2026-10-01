@@ -24,6 +24,7 @@ import (
 	kubetesting "k8s.io/client-go/testing"
 
 	runnerv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runner/v1"
+	"github.com/agynio/k8s-runner/internal/config"
 )
 
 var preparedPodResource = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
@@ -112,6 +113,36 @@ func TestPreparedWorkloadStartsGated(t *testing.T) {
 	}
 	if len(pvc.Finalizers) != 0 {
 		t.Fatal("preparation must not claim execution before activation")
+	}
+}
+
+func TestPreparedWorkloadOperatorRuntime(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "configured runtime", true: "conflict before mutation"}[conflict], func(t *testing.T) {
+			client := preparedTestClient()
+			srv := New(Options{Clientset: client, Namespace: "default", StorageSize: "1Mi", Logger: zap.NewNop(),
+				WorkloadRuntimeClassName:  "isolated-tasks",
+				CapabilityImplementations: config.CapabilityImplementations{Docker: config.DockerImplementationKataQemu}})
+			req := preparedTestRequest()
+			if conflict {
+				req.Workload.Capabilities = []string{"docker"}
+			}
+			response, err := srv.PrepareWorkload(context.Background(), req)
+			if conflict {
+				if status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("expected conflict, got %v", err)
+				}
+				assertNoVolumeMutation(t, client)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := preparedTestPod(t, client, response.Binding)
+			if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "isolated-tasks" || !hasPreparedGate(pod) {
+				t.Fatalf("prepared runtime or gate lost: %+v", pod.Spec)
+			}
+		})
 	}
 }
 
