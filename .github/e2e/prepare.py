@@ -25,3 +25,16 @@ s = s.replace(anchor, step + anchor)
 # describes/events, which contain the image pull error.
 s = s.replace('set -uo pipefail', 'set +e\n        set -uo pipefail')
 action.write_text(s)
+
+# Keep the pinned action's suite selection, execution and result handling. Only
+# adapt its checked-out runner client before the original test pipeline runs.
+action = root / '.github/actions/run-tests/action.yml'
+s = action.read_text()
+anchor = '    - name: Stage provider binary\n'
+assert s.count(anchor) == 1 and 'Configure native runner fixture' not in s
+step = '''    - name: Configure native runner fixture
+      shell: bash
+      run: python3 "$GITHUB_WORKSPACE/.github/e2e/patch-native-client.py" "$GITHUB_WORKSPACE/e2e"
+
+'''
+action.write_text(s.replace(anchor, step + anchor))

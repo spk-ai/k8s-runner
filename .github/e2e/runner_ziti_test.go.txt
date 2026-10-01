@@ -1,0 +1,165 @@
+//go:build e2e && (svc_k8s_runner || svc_agents_orchestrator || smoke)
+
+package tests
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+	"testing"
+	"time"
+
+	runnerv1 "github.com/agynio/e2e/suites/go-core/.gen/go/agynio/api/runner/v1"
+	runnersv1 "github.com/agynio/e2e/suites/go-core/.gen/go/agynio/api/runners/v1"
+	zitiv1 "github.com/agynio/e2e/suites/go-core/.gen/go/agynio/api/ziti_management/v1"
+	"github.com/openziti/sdk-golang/ziti"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
+)
+
+// This fixture uses the native service identity lifecycle and existing policy.
+// It never changes transport enforcement or creates authorization grants.
+func dialNativeRunner(t *testing.T, opts ...grpc.DialOption) *grpc.ClientConn {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	registry := runnersv1.NewRunnersServiceClient(dialGRPC(t, envOrDefault("RUNNERS_ADDRESS", "runners:50051")))
+	var service string
+	token := ""
+	seen := map[string]bool{}
+	for {
+		page, err := registry.ListRunners(contextWithIdentity(ctx, clusterAdminIdentityID, identityTypeUser), &runnersv1.ListRunnersRequest{PageSize: 100, PageToken: token})
+		if err != nil {
+			t.Fatalf("discover native runner: %v", err)
+		}
+		for _, r := range page.GetRunners() {
+			if r.GetName() != "k8s-runner" {
+				continue
+			}
+			expected := "runner-" + r.GetMeta().GetId()
+			if service != "" || r.GetMeta().GetId() == "" || r.GetOpenzitiServiceName() != expected {
+				t.Fatal("bundled runner discovery is ambiguous or has an invalid native service")
+			}
+			service = expected
+		}
+		token = page.GetNextPageToken()
+		if token == "" {
+			break
+		}
+		if seen[token] {
+			t.Fatal("runner pagination repeated a token")
+		}
+		seen[token] = true
+	}
+	if service == "" {
+		t.Fatal("native bundled runner not registered")
+	}
+	mgmt := zitiv1.NewZitiManagementServiceClient(dialGRPC(t, zitiManagementAddr(t)))
+	enrolled, err := mgmt.RequestServiceIdentity(ctx, &zitiv1.RequestServiceIdentityRequest{ServiceType: zitiv1.ServiceType_SERVICE_TYPE_ORCHESTRATOR})
+	if err != nil {
+		t.Fatalf("enroll native runner test client: %v", err)
+	}
+	id := enrolled.GetZitiIdentityId()
+	if id == "" {
+		t.Fatal("native enrollment returned no identity ID")
+	}
+	var deleteOnce sync.Once
+	var deleteErr error
+	deleteIdentity := func() error {
+		deleteOnce.Do(func() {
+			cleanupCtx, stop := context.WithTimeout(context.Background(), 30*time.Second)
+			defer stop()
+			_, deleteErr = mgmt.DeleteIdentity(cleanupCtx, &zitiv1.DeleteIdentityRequest{ZitiIdentityId: id})
+			if status.Code(deleteErr) == codes.NotFound {
+				deleteErr = nil
+			}
+		})
+		return deleteErr
+	}
+	t.Cleanup(func() {
+		if err := deleteIdentity(); err != nil {
+			t.Errorf("delete native test identity: %v", err)
+		}
+	})
+	var cfg ziti.Config
+	// Never include identity JSON or its decoded key material in diagnostics.
+	if json.Unmarshal(enrolled.GetIdentityJson(), &cfg) != nil {
+		t.Fatal("invalid native identity configuration")
+	}
+	overlay, err := ziti.NewContext(&cfg)
+	if err != nil {
+		t.Fatal("initialize native test overlay")
+	}
+	t.Cleanup(overlay.Close)
+	// Chart 0.73.0 uses native ziti-management 0.13.0: a five-minute lease
+	// with a one-minute GC sweep. Never renew a hung fixture indefinitely.
+	lifetime, stopLifetime := context.WithTimeout(context.Background(), 20*time.Minute)
+	renewalCtx, stopSignals := signal.NotifyContext(lifetime, os.Interrupt, syscall.SIGTERM)
+	stopRenewal := func() { stopSignals(); stopLifetime() }
+	done := make(chan struct{})
+	failures := make(chan error, 1)
+	go func() {
+		defer close(done)
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-renewalCtx.Done():
+				overlay.Close()
+				if err := deleteIdentity(); err != nil {
+					failures <- fmt.Errorf("delete cancelled native fixture: %w", err)
+				}
+				return
+			case <-ticker.C:
+				renewCtx, stop := context.WithTimeout(renewalCtx, 10*time.Second)
+				_, err := mgmt.ExtendIdentityLease(renewCtx, &zitiv1.ExtendIdentityLeaseRequest{ZitiIdentityId: id})
+				stop()
+				if err != nil && renewalCtx.Err() == nil {
+					failures <- fmt.Errorf("renew native test identity lease: %w", err)
+					overlay.Close() // Fail closed; never fall back to TCP.
+					return
+				}
+			}
+		}
+	}()
+	t.Cleanup(func() {
+		stopRenewal()
+		<-done
+		select {
+		case err := <-failures:
+			t.Error(err)
+		default:
+		}
+	})
+	options := append([]grpc.DialOption{}, opts...)
+	options = append(options, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock(),
+		grpc.WithContextDialer(func(ctx context.Context, _ string) (net.Conn, error) { return overlay.DialContext(ctx, service) }))
+	conn, err := grpc.DialContext(ctx, "passthrough:///"+service, options...)
+	if err != nil {
+		t.Fatalf("dial native runner overlay: %v", err)
+	}
+	t.Cleanup(func() { conn.Close() })
+	return conn
+}
+
+// The transport repair must never make raw TCP control usable.
+func TestRunnerControlRejectsTCP(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	conn, err := grpc.DialContext(ctx, runnerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()), grpc.WithBlock())
+	if err != nil {
+		t.Fatalf("connect runner readiness transport: %v", err)
+	}
+	defer conn.Close()
+	_, err = runnerv1.NewRunnerServiceClient(conn).StartWorkload(ctx, &runnerv1.StartWorkloadRequest{})
+	if status.Code(err) != codes.Unauthenticated || status.Convert(err).Message() != "runner_control_requires_ziti" {
+		t.Fatalf("raw TCP runner control must reject before request validation: %v", err)
+	}
+}

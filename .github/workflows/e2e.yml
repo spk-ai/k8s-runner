@@ -43,7 +43,7 @@ jobs:
         run: devspace run deploy
 
       - name: Run E2E tests
-        uses: agynio/e2e/.github/actions/run-tests@435b549a937129b6858e7314648eb690894209fe
+        uses: ./.e2e-tooling/.github/actions/run-tests
         with:
           e2e-ref: 435b549a937129b6858e7314648eb690894209fe
           service: k8s_runner
@@ -55,3 +55,11 @@ jobs:
           kubectl get pods -n agyn-platform -l app.kubernetes.io/name=k8s-runner -o wide || true
           kubectl describe pods -n agyn-platform -l app.kubernetes.io/name=k8s-runner || true
           kubectl logs -n agyn-platform -l app.kubernetes.io/name=k8s-runner --all-containers --tail=100 || true
+
+      - name: Stop disposable platform VM
+        if: always()
+        timeout-minutes: 3
+        run: |
+          if command -v agyn >/dev/null 2>&1; then
+            agyn local stop
+          fi
