@@ -16,3 +16,7 @@ fixture = Path(__file__).with_name('runner_ziti_test.go.txt').read_text()
 p.write_text(s.replace(anchor, anchor + '\tif addr == runnerAddr { return dialNativeRunner(t, opts...) }\n'))
 (root / 'runner_ziti_test.go').write_text(fixture)
 config.write_text(config_text.replace(old, '  - git_repo: https://github.com/spk-ai/api.git\n    ref: ce64da8680c39a13f7174c3146b38f3bfcc03037\n    subdir: proto'))
+
+# The checked-removal contract is part of the same pinned native API.
+import subprocess
+subprocess.run([sys.executable, str(Path(__file__).with_name('patch-native-volumes.py')), sys.argv[1]], check=True)
