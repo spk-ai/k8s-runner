@@ -363,6 +363,13 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 	if err := s.matchPreparedPod(pod, expected); err != nil {
 		return nil, err
 	}
+	// A preparation may outlive a runner restart or runtime-policy change.
+	// Check the actual immutable Pod field before anchor, PVC or gate writes;
+	// cleanup deliberately remains independent of the current runtime policy.
+	if required := s.workloadRuntimeClassName; required != "" &&
+		(pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != required) {
+		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_runtime_mismatch")
+	}
 	active := pod.Annotations[preparedStateAnnotation] == "active"
 	if pod.DeletionTimestamp != nil || active && hasPreparedGate(pod) || !active && (pod.Annotations[preparedStateAnnotation] != "prepared" || !hasPreparedGate(pod) || pod.Spec.NodeName != "") {
 		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_not_activatable")

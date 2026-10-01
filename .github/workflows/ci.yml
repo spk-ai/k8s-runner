@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version: '1.25.x'
+          go-version: '1.27.1'
 
       - name: Install Helm
         uses: azure/setup-helm@v4
@@ -30,8 +30,17 @@ jobs:
       - name: Install buf
         uses: bufbuild/buf-setup-action@v1
 
+      # Prepared workloads and anchored volumes require this reviewed API tree.
+      - name: Checkout matching API contract
+        uses: actions/checkout@v4
+        with:
+          repository: spk-ai/api
+          ref: 647cc17d3a8171ddf41256b3a8a8c1aaa8c7c6e2
+          path: .ci-api
+          persist-credentials: false
+
       - name: Generate protobuf bindings
-        run: buf generate --include-imports
+        run: buf generate .ci-api --include-imports
 
       - name: Run tests
         run: go test ./...

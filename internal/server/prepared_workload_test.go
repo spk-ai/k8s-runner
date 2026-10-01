@@ -487,3 +487,51 @@ func TestPreparedVolumeSerializesActivationsAcrossPods(t *testing.T) {
 		t.Fatal("resume lost its own identity or workspace")
 	}
 }
+
+func TestPreparedActivationRechecksRuntimeAfterRestart(t *testing.T) {
+	for _, previous := range []string{"", "old-runtime", "required-runtime"} {
+		for _, alreadyActive := range []bool{false, true} {
+			t.Run(previous+map[bool]string{false: "/prepared", true: "/active"}[alreadyActive], func(t *testing.T) {
+				client := preparedTestClient()
+				before := preparedTestServer(client)
+				before.workloadRuntimeClassName = previous
+				binding := prepareAnchoredTest(t, before, anchoredTestRequest(t, before, false, false))
+				if alreadyActive {
+					if _, err := before.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: binding}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				after := preparedTestServer(client)
+				after.workloadRuntimeClassName = "required-runtime"
+				client.ClearActions()
+				_, err := after.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: binding})
+				if previous == "required-runtime" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "prepared_workload_runtime_mismatch" {
+						t.Fatalf("runtime change accepted: %v", err)
+					}
+					for _, action := range client.Actions() {
+						if action.GetVerb() != "get" {
+							t.Fatalf("runtime rejection mutated %s %s", action.GetVerb(), action.GetResource().Resource)
+						}
+					}
+					if !alreadyActive && !hasPreparedGate(preparedTestPod(t, client, binding)) {
+						t.Fatal("rejected pod lost gate")
+					}
+				}
+				// Policy changes must never strand cleanup of an older incarnation.
+				request := &runnerv1.RemovePreparedWorkloadRequest{Expected: binding}
+				if _, err := after.RemovePreparedWorkload(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+				result, err := after.RemovePreparedWorkload(context.Background(), request)
+				if err != nil || result.GetState() != runnerv1.PreparedWorkloadRemovalState_PREPARED_WORKLOAD_REMOVAL_STATE_ABSENT {
+					t.Fatalf("cleanup blocked: %v", err)
+				}
+			})
+		}
+	}
+}

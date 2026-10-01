@@ -18,3 +18,6 @@ internal/.gen/
 
 # Buffers / temp
 tmp/
+
+# Reviewed API checkout used by CI; generated bindings remain untracked.
+.ci-api/
