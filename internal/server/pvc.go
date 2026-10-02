@@ -22,6 +22,10 @@ func validatePVCReuse(existing, desired *corev1.PersistentVolumeClaim) error {
 	return validatePVCReuseSpec(existing, desired)
 }
 
+// validatePVCReuseSpec preserves owner/key identity across workload/thread changes.
+// Reuse never repairs labels, resizes claims or changes an implicit storage class.
+// Adoption requires READY with no migration hold; an active owner alone is not
+// enough. Validation is neither caller authentication nor a storage fence.
 func validatePVCReuseSpec(existing, desired *corev1.PersistentVolumeClaim) error {
 	if existing == nil || existing.Name != desired.Name || existing.Namespace != desired.Namespace {
 		return status.Error(codes.FailedPrecondition, "pvc_identity_mismatch")

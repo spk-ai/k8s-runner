@@ -121,6 +121,11 @@ func (s *Server) readResourceAnchor(ctx context.Context, expected *runnerv1.Reso
 	return cm, nil
 }
 
+// ReserveResourceAnchor reserves metadata only. Persist the UID before authorizing
+// creation; recover matching metadata only while that authority remains unused.
+// A same-name replacement cannot substitute for a pinned generation. Lost replies
+// leave metadata, not compute. Labels and backend IDs are not authentication.
+// @see runners::internal/server/resource_anchors
 func (s *Server) ReserveResourceAnchor(ctx context.Context, req *runnerv1.ReserveResourceAnchorRequest) (*runnerv1.ReserveResourceAnchorResponse, error) {
 	if err := validateResourceAnchor(req.GetIntent(), false); err != nil {
 		return nil, err
@@ -167,6 +172,10 @@ func (s *Server) ReserveResourceAnchor(ctx context.Context, req *runnerv1.Reserv
 	return &runnerv1.ReserveResourceAnchorResponse{Anchor: intent}, nil
 }
 
+// RemoveWorkloadAnchor revokes only a workload owner with UID/revision conditions.
+// An activation claim requires exact selected-Pod retirement first, even with a lost
+// gate PATCH reply. ABSENT describes the owner, not child/credential cleanup;
+// delayed gated children need observed GC and persistent volume owners remain.
 func (s *Server) RemoveWorkloadAnchor(ctx context.Context, req *runnerv1.RemoveWorkloadAnchorRequest) (*runnerv1.RemoveWorkloadAnchorResponse, error) {
 	if err := validateResourceAnchor(req.GetExpected(), true); err != nil {
 		return nil, err

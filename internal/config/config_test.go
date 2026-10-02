@@ -4,6 +4,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestLoadZitiEnrollmentTimeoutDefault(t *testing.T) {
@@ -157,6 +158,28 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("GATEWAY_ADDRESS", defaultGatewayAddress)
 	t.Setenv("SERVICE_TOKEN", "test-service-token")
 	t.Setenv("SUPPORTING_CONTAINER_RESOURCES", "")
+	unsetEnv(t, "WORKLOAD_SECRET_SWEEP_INTERVAL")
+	unsetEnv(t, "WORKLOAD_SECRET_SWEEP_GRACE")
+}
+
+func TestLoadSecretSweep(t *testing.T) {
+	setBaseEnv(t)
+	cfg, err := Load()
+	if err != nil || cfg.SecretSweepInterval != 0 || cfg.SecretSweepGrace != defaultSecretSweepGrace {
+		t.Fatalf("sweep must default to disabled with the default grace: interval=%s grace=%s err=%v", cfg.SecretSweepInterval, cfg.SecretSweepGrace, err)
+	}
+	t.Setenv("WORKLOAD_SECRET_SWEEP_INTERVAL", "15s")
+	t.Setenv("WORKLOAD_SECRET_SWEEP_GRACE", "1m")
+	if cfg, err = Load(); err != nil || cfg.SecretSweepInterval != 15*time.Second || cfg.SecretSweepGrace != time.Minute {
+		t.Fatalf("interval=%s grace=%s err=%v", cfg.SecretSweepInterval, cfg.SecretSweepGrace, err)
+	}
+	for _, invalid := range [][2]string{{"-1s", "1m"}, {"1s", "1m"}, {"soon", "1m"}, {"15s", "59s"}, {"0", "0s"}, {"15s", ""}} {
+		t.Setenv("WORKLOAD_SECRET_SWEEP_INTERVAL", invalid[0])
+		t.Setenv("WORKLOAD_SECRET_SWEEP_GRACE", invalid[1])
+		if _, err := Load(); err == nil || !strings.Contains(err.Error(), "WORKLOAD_SECRET_SWEEP_") {
+			t.Fatalf("interval=%q grace=%q accepted: %v", invalid[0], invalid[1], err)
+		}
+	}
 }
 
 func TestLoadWorkloadRuntimeClass(t *testing.T) {

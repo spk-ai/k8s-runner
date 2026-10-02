@@ -12,6 +12,10 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// InspectPreparedWorkload reads a known binding, never probes by activation. Match
+// backend, Pod/claim UIDs, owners and active holds across a stable Pod revision.
+// Unactivated compute must be gated and unexecuted; snapshot changes require another
+// read, not repair. Activation and container readiness are separate observations.
 func (s *Server) InspectPreparedWorkload(ctx context.Context, req *runnerv1.InspectPreparedWorkloadRequest) (*runnerv1.InspectPreparedWorkloadResponse, error) {
 	expected, err := canonicalBinding(req.GetExpected())
 	if err != nil {

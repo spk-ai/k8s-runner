@@ -181,6 +181,15 @@ func (s *Server) adoptionIdlePVC(ctx context.Context, pvc *corev1.PersistentVolu
 	return nil
 }
 
+// ReserveVolumeAnchorAdoption creates metadata, never storage. The caller must hold
+// durable owner-wide admission blocking and drain writers. Require the original
+// Bound PVC, no workload holds and a complete versioned Pod inventory without
+// references, including terminal/deleting/unmanaged Pods. Pin the journal UID on
+// the owner before replying; missing pinned evidence or changed UID/spec requires
+// reconciliation, never recreation.
+// @see api::proto/agynio/api/runner/v1/runner
+// @see runners::internal/server/volume_anchor_migration
+// @see orchestrator::internal/volumemigration/coordinator
 func (s *Server) ReserveVolumeAnchorAdoption(ctx context.Context, req *runnerv1.ReserveVolumeAnchorAdoptionRequest) (*runnerv1.ReserveVolumeAnchorAdoptionResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_adoption_request_required")
@@ -374,6 +383,9 @@ func (s *Server) observeVolumeAdoption(ctx context.Context, value *runnerv1.Volu
 	return owner, pvc, &runnerv1.ObserveVolumeAnchorAdoptionResponse{Adoption: a, Volume: bound, State: state}, nil
 }
 
+// ObserveVolumeAnchorAdoption is read-only and matches the journal, owner, original
+// PVC spec/UID and live backend. RESERVED/APPLIED/READY are distinct; missing or
+// changed evidence is an error, not absence or permission to rebind.
 func (s *Server) ObserveVolumeAnchorAdoption(ctx context.Context, req *runnerv1.ObserveVolumeAnchorAdoptionRequest) (*runnerv1.ObserveVolumeAnchorAdoptionResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_adoption_request_required")
@@ -382,6 +394,10 @@ func (s *Server) ObserveVolumeAnchorAdoption(ctx context.Context, req *runnerv1.
 	return response, err
 }
 
+// ApplyVolumeAnchorAdoption attaches the exact owner, receipt and migration hold
+// atomically with PVC UID/resource-version tests, preserving spec and unrelated
+// metadata. APPLIED is not reusable: persist that binding in the registry under
+// the owner block before finalization may remove this operation's hold.
 func (s *Server) ApplyVolumeAnchorAdoption(ctx context.Context, req *runnerv1.ApplyVolumeAnchorAdoptionRequest) (*runnerv1.ApplyVolumeAnchorAdoptionResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_adoption_request_required")
@@ -421,6 +437,10 @@ func (s *Server) ApplyVolumeAnchorAdoption(ctx context.Context, req *runnerv1.Ap
 	return &runnerv1.ApplyVolumeAnchorAdoptionResponse{Adoption: observed.Adoption, Volume: observed.Volume, State: observed.State}, nil
 }
 
+// FinalizeVolumeAnchorAdoption activates owner metadata, rechecks storage/drain,
+// then marks READY and removes only its hold. Partial finalization remains blocked;
+// once READY, retries only observe. Adoption never allocates, resizes or deletes
+// PVCs/Pods, supplies credentials or retries a turn.
 func (s *Server) FinalizeVolumeAnchorAdoption(ctx context.Context, req *runnerv1.FinalizeVolumeAnchorAdoptionRequest) (*runnerv1.FinalizeVolumeAnchorAdoptionResponse, error) {
 	if req == nil || len(req.ProtoReflect().GetUnknown()) != 0 {
 		return nil, status.Error(codes.InvalidArgument, "volume_adoption_request_required")

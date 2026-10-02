@@ -10,6 +10,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 )
 
+// volumeBackendID derives storage scope from the live Namespace name/API UID,
+// never request metadata. Callers check before and after inventory/absence:
+// disappearance, termination or replacement is not PVC absence. Restart and
+// harmless metadata changes retain identity; cloned clusters are not fenced.
 func (s *Server) volumeBackendID(ctx context.Context) (string, error) {
 	if len(validation.IsDNS1123Label(s.namespace)) != 0 {
 		return "", status.Error(codes.FailedPrecondition, "valid_volume_namespace_required")

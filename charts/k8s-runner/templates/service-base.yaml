@@ -1,4 +1,5 @@
 {{- include "k8s-runner.configureCatalog" . -}}
+{{- include "k8s-runner.configureSecretSweep" . -}}
 {{- $rbac := "" -}}
 {{- if .Values.rbac.clusterWide -}}
   {{- $rbac = include "service-base.rbac" . -}}

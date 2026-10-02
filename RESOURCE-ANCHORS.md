@@ -1,57 +1,36 @@
 # Native Resource Anchors
 
+This guide preserves the original resource-anchor acceptance and integration
+gates. Use [README.md](README.md) for the rebased build dependency; the revisions,
+checklist and results below are historical, not current release acceptance.
+
 Native source and isolated Kubernetes acceptance pass on `feat/resource-anchors`,
 based on preparation observation `6fdcc41` and API `3b25d03` (base `d6449dd`).
 Registry/controller integration remains incomplete. Nothing is installed.
 This is a dependent capability proposal, not production readiness or a safe
 mixed-writer upgrade. Preserve the reviewed installed prepared/DNS stack.
 
-## Required Ordering
+## Contract Owners
 
-1. Reserve native metadata-only workload and volume anchors and persist their
-   exact backend/owner/UIDs in the durable registry before authorizing creation.
-2. Anchored preparation receives those exact UIDs. Each gated Pod is owned by
-   its workload anchor in CREATE. Every PVC is owned by its separate persistent
-   volume anchor in CREATE. Credentials stay owned by their exact Pod.
-3. Select exactly one Pod UID on its workload anchor with a UID/revision-checked
-   metadata PATCH before credentials. Claim activation on that same anchor
-   before sending any gate PATCH. Revocation DELETE uses the same UID/revision:
-   either revocation wins, or it must observe/retire the activation's exact Pod.
-   Check anchor identity at creation/activation boundaries. A revoked/replaced
-   anchor never authorizes retargeting or retry.
-4. For unexecuted preparation, durable retirement excludes new activation before
-   workload-anchor removal. A delayed Pod CREATE still references the deleted
-   UID, stays gated and is subject to Kubernetes GC. Observe child cleanup; an
-   anchor's absence alone is not physical workload/credential absence.
-5. For any potentially activated Pod, retain exact-Pod removal and side-effect
-   reconciliation before anchor revocation. Never infer no execution from GC.
-6. Retain volume anchors and PVCs across turns. Their eventual deletion requires
-   the checked volume lifecycle and a separate anchored-removal contract, not
-   the workload-anchor removal RPC.
+Start at [resource_anchors.go](internal/server/resource_anchors.go),
+[anchored_workload.go](internal/server/anchored_workload.go) and
+[prepared_workload.go](internal/server/prepared_workload.go) for native contracts.
 
-Reserving an anchor may be repeated only while the registry has not authorized
-resource creation. A matching existing anchor is metadata recovery, not startup
-replay. A later same-name anchor has a different UID and cannot replace a pinned
-generation. A lost reservation reply can leave metadata only, not compute or a
-workspace. Ownership labels and backend IDs are assertions, not authentication.
+Registry persistence must precede native creation authority. Labels and backend
+IDs are assertions, not caller authentication. A same-name owner is not a
+replacement for a persisted UID, and owner absence is not child cleanup evidence.
 
 ## Implementation And Acceptance Checklist
 
-- [x] Additive reservation/anchored-prepare/removal API and native handlers.
-- [x] Exact immutable ConfigMap owner identity and scoped chart RBAC.
-- [x] Atomic Pod/PVC ownership, bound workspace reuse and legacy rejection.
-- [x] Unit/race tests for late writes, wrong owners/UIDs, missing/replaced
-      anchors, first/existing/zero-volume workspaces and compute/volume lifetimes.
-- [x] Real Kubernetes delayed-create and GC acceptance with exact UID checks.
+Native acceptance is recorded below. Remaining integration gates at that revision:
+
 - [ ] Registry persistence and all-writer guards before native write authority.
 - [ ] Agent/sandbox controller migration and interrupted preparation recovery.
 - [ ] Checked volume retirement and stale-create cleanup without workspace loss.
 - [ ] Coordinated DNS-compatible A2A/agent rollout and production enforcement.
 
-The API is distinct from legacy preparation, so unsupported servers cannot
-silently omit ownership. No timeout, NotFound check or read-then-create alone
-proves an in-flight Kubernetes request cannot commit later. This design uses
-retained owner incarnations and gated execution, not such an assumption.
+Do not treat a timeout, NotFound check or read-then-create as proof that an
+in-flight Kubernetes request cannot commit later.
 
 Kubernetes documents same-namespace [owner references](https://kubernetes.io/docs/concepts/overview/working-with-objects/owners-dependents/),
 asynchronous [garbage collection](https://kubernetes.io/docs/concepts/architecture/garbage-collection/)

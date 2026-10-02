@@ -1,91 +1,41 @@
 # Prepared Workloads
 
+This guide records the original preparation, inspection, Secret-ownership and
+observation acceptance. Dependency revisions and results below are historical;
+see [README.md](README.md) for the rebased build dependency.
+
 Dependent preparation-observation implementation on atomic-Secret runner
 `1f33556`. This branch requires the matching `feat/prepared-outcome-observation`
 API, based on inspection API `24b73ca`. It is not a drop-in image for installed
 controllers. No installed platform deployment changes in these fixtures.
 
-## Native Contract
+## Contract Owners
 
-- `PrepareWorkload` requires a canonical workload UUID and expected backend.
-  Existing volume bindings are read-only inputs: a missing or replaced bound
-  claim is never recreated. New volumes use the existing ownership/spec checks.
-  All named volumes appear in the returned binding, not just main's mounts.
-- The Pod starts with `agyn.io/workload-binding` in `spec.schedulingGates`.
-  Its annotation stores backend/workload/volume identities, not credentials.
-  Kubernetes >=1.30 is verified before resource creation; Pod creation requests
-  strict field validation. Trusted admission must preserve the gate.
-- The gated Pod starts in native `preparing` state. Temporary Secrets are staged
-  in memory until its UID is confirmed, then created with that exact Pod owner
-  in the CREATE itself. A crash cannot interrupt a separate ownership PATCH.
-  After every Secret CREATE is acknowledged and validated, a Pod UID/resource-
-  version checked PATCH commits `prepared` state without removing its gate.
-  Incomplete setup cannot activate; failed/uncertain Pod creation writes no
-  credentials. Kubernetes GC owns even delayed credential writes after Pod
-  removal. No prepared-path name-only Secret deletion or adoption is used.
-- The caller must persist/verify the binding before `ActivateWorkload`.
-  Activation checks exact Pod/backend/claim identity, applies a per-Pod
-  `agyn.io/workload-<pod-uid>` finalizer to every claim, and only then removes its
-  gate with Pod UID/resource-version preconditions. Other gates/finalizers stay.
-  Another Pod's hold prevents concurrent activation on the same claim.
-- Successful deletion and lost replies do not release holds. Only a later
-  `RemovePreparedWorkload` observing the original Pod absent can remove its own
-  holds. It never removes another controller's finalizer or deletes a PVC.
-  An activation never creates a Pod, so a delayed gate patch cannot activate a
-  same-name replacement after the original UID is gone.
-- Repeating activation on the same already-active binding is read-only. It is
-  not permission to replay a task message or repeat uncertain preparation.
-  JSON-Patch revision conflicts can surface as InvalidArgument or Aborted; the
-  immutable activation may be retried, not retargeted.
-- Legacy Stop/Remove reject prepared Pods. Legacy Start rejects held claims,
-  but is otherwise still available. Drain/migrate all writers and enforce access
-  before using the new path for production isolation. Never fall back on
-  Unimplemented; distinct RPCs prevent old servers ignoring new preconditions.
+Start at [prepared_workload.go](internal/server/prepared_workload.go); related
+contracts are in [anchored_workload.go](internal/server/anchored_workload.go) and
+[pvc.go](internal/server/pvc.go).
+
+Deployment requires Kubernetes >=1.30, strict Pod-create validation, gate-aware
+schedulers and trusted admission preserving identity and gates. Drain/migrate
+all writers and coordinate registry/controller/native/API versions. Distinct
+RPCs must fail closed on Unimplemented; legacy methods are not a safe fallback.
 
 ## Read-Only Inspection
 
-`InspectPreparedWorkload` takes the stored complete workload binding. It checks
-the backend, Pod UID, original binding annotation, named claim set, claim UIDs
-and owner labels. Active Pods require their existing claim holds; inspection
-never repairs holds or removes a scheduling gate. An unactivated Pod must not
-be scheduled or have evidence of container execution. Two Pod reads must retain
-the same resource version. A concurrent change requires another read-only
-attempt, not activation as a probe or a name-only fallback.
-
-The response reports the validated Pod snapshot, native activation state,
-deletion-pending flag and resource version. Activation is not container readiness.
-This is not an atomic multi-resource snapshot, authenticated receipt, recovery
-of an unknown prepare intent, or node/storage fencing.
-
-Native `preparing` is not inspectable as a completed prepared workload. The
-separate preparation-observation contract below permits retirement discovery,
-not inference of setup completion or authority to replay preparation.
-
-Inspection adds no RBAC mutation rights. The focused tests assert GET-only
-Kubernetes actions for successful, conflicting and failed inspections.
+See `InspectPreparedWorkload` in
+[prepared_inspection.go](internal/server/prepared_inspection.go).
+Activation is not readiness; inspection is not an atomic multi-resource snapshot,
+authenticated receipt or node/storage fence. Incomplete preparation has its
+separate retirement-discovery path below.
 
 ## Lost Preparation Observation
 
-`ObserveWorkloadPreparation` takes the original workload intent UUID and backend
-ID. It returns an exact binding only for a gated, unscheduled Pod in `preparing`
-or `prepared` state, with no current or prior container execution, including
-init and ephemeral containers. Pod creation now records the atomic-credential
-contract marker `agyn.io/preparation-recovery=pod-owned-secrets/v1`. Older Pods
-without this marker are refused because their Secrets may have been ownerless.
-
-The method checks the Pod's stored intent, actual UID, all named claim UIDs and
-owners, non-deleting/non-lost claims, stable Pod resource version across two
-reads, and backend identity before and after inspection. Only manager and
-agent/instance/thread or sandbox/owner labels are returned. No Secret read/list,
-Kubernetes mutation, activation or name-only removal occurs. This remains a
-checked observation, not an atomic multi-resource snapshot or signed receipt.
-
-The controller must durably enter REMOVING, validate the full owner and volume
-set, persist checked volume/workload bindings and retire that exact Pod through
-the existing removal API. A pending Pod deletion is observable; native absence
-is not. NotFound and Unimplemented retain admission and never permit another
-prepare. In particular, initially absent and delayed Pod/PVC creation remain
-unresolved rather than being reported safe to retry.
+See `ObserveWorkloadPreparation` in
+[prepared_observation.go](internal/server/prepared_observation.go).
+The controller must persist retirement authority and validate durable identities
+before cleanup. No missing outcome authorizes another preparation; late creation,
+old ownerless Secrets and authenticated all-writer enforcement need separate
+reconciliation. The evidence below retains its original observation-only scope.
 
 On 2026-09-15, the full native race suite passes 551 test entries, with seven
 opt-in/child entries skipped outside their gates; build and unfiltered vet pass.
@@ -99,14 +49,9 @@ native agent sessions. The old ownership fix's evidence below is historical.
 
 ## Permissions And Limits
 
-The chart adds PVC/Secret `patch` within its existing namespaced rules. No
-Secret list/watch, namespace list/write, wildcard grant or new cluster-wide
-mutation permission is added. The existing GET-only named-namespace grant is
-still required. External RBAC must supply these same permissions.
-
-The protocol currently limits preparations to 64 volume specs and binding
-annotations to 64 KiB. UUIDs must be canonical, nonzero strings. Native Pod UIDs
-are Kubernetes UUIDs, not caller-selected or inferred from a Pod name.
+External RBAC must supply the [chart's workload permissions](charts/k8s-runner/values.yaml)
+and [named-namespace grant](charts/k8s-runner/templates/volume-backend-rbac.yaml)
+before rolling out the runner image.
 
 This is an execution identity guard, not an authenticated authorization receipt,
 an admission webhook, storage fencing, or an exactly-once side-effect engine.
@@ -161,20 +106,13 @@ transport child helper is exercised through its parent. The initial live fixture
 omitted required supporting-resource configuration and was rejected before any
 workload creation; it was corrected without weakening runner validation.
 
-Unit/race tests cover invalid and missing identities, backend changes, missing
-resume PVCs (including loss between reads), concurrent-owner exclusion,
-UID/resource-version races, lost activation replies, retry across runner
-restart, namespace-version compatibility, protected Secret ownership, and
-removal only after native absence. Existing lifecycle tests stay enabled.
+The [native fixture](internal/server/prepared_workload_live_test.go) requires
+explicit disposable-cluster permission, including namespace/RBAC creation and
+service-account impersonation. It is not acceptance of the A2A controller,
+registry, model credentials or actual Ziti transport. Do not use installed
+workspaces or provider credentials.
 
-Opt-in native acceptance uses a new namespace, chart service-account permissions,
-GET-only namespace RBAC, a deny-network policy and bounded model-free containers.
-It verifies real execution/resume, deletion protection and stale activation
-against Kubernetes. Fixture-only temporary resources are removed and absence is
-confirmed. It uses no A2A controller, registry, model credentials or actual Ziti
-transport, and does not claim those acceptance scopes.
-
-Generate the required local API before building this dependent runner. Run this
+To reproduce the historical observation branch, generate its required local API
 in the matching `api-prepared-observation` checkout, with adjacent checkouts:
 
 ```bash

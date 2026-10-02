@@ -2,6 +2,9 @@
 
 k8s-runner is the Kubernetes-native implementation of the RunnerService gRPC API.
 
+See [AGENTS.md](AGENTS.md) for source owners and contribution rules, and
+[docs/catalog.json](docs/catalog.json) for operational and historical documents.
+
 The `sync/2026-09-24-volume-adoption` branch rebases the tested contribution
 stack onto upstream `3bd3355`. Generate from `spk-ai/api` `c21440b` on
 `sync/2026-09-24-volume-adoption`, which includes upstream flavor contracts and
@@ -18,84 +21,54 @@ Architecture: [k8s-runner](https://github.com/agynio/architecture/blob/main/arch
 
 ## Volume Inventory Integrity
 
-`ListVolumes` returns `FailedPrecondition` without a partial response if any
-runner-managed PVC has a missing, empty, whitespace-padded or duplicate
-`volume_key`. A successful inventory is used by reconcilers as evidence that
-unlisted volumes are absent, so silently omitting malformed managed claims can
-incorrectly close a retained workspace's record. Unmanaged PVCs remain excluded.
+See `ListVolumes` in [query.go](internal/server/query.go) for the inventory contract.
 
-This changes the former skip-missing-key behavior. A damaged inventory requires
-operator ownership reconciliation before volume reconciliation can proceed;
-the runner does not adopt, relabel or delete claims to repair it. This is not
-deletion authorization or node/late-create fencing. Valid orphan inventory still needs a controller
-that does not infer deletion permission from a stale or scoped registry scan.
+A damaged inventory requires operator ownership reconciliation before volume
+reconciliation can proceed. Inventory is not deletion authorization or
+node/late-create fencing; the controller must not infer deletion permission from
+a stale or scoped registry scan.
 
 After generating the APIs, run `go test -race ./...`. Focused tests are
 `go test -race ./internal/server -run '^TestListVolumes' -count=1`.
 
 ## Volume Backend Identity
 
-This dependent proposal requires the backend-identity API extension. Inventory
-and checked removal now identify the storage scope as
-`kubernetes-namespace/v1/<namespace-name>/<namespace-uid>`. The UID comes from
-the Kubernetes API, never configuration, a caller header or the expected target.
-[Kubernetes object IDs](https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#uids)
-distinguish a namespace from another incarnation using the same name.
+See [volume_backend.go](internal/server/volume_backend.go) for the native contract.
+The backend-identity API extension and all consumers must be coordinated;
+a different namespace UID is not evidence that an original PVC disappeared.
 
-The runner reads that identity before and after inventory/deletion observations.
-A missing, terminating, inaccessible or replaced namespace cannot establish PVC
-absence. Existing PVC UID/resource-version deletion preconditions remain in use.
-Ordinary namespace metadata updates and runner restarts preserve the identity.
-Both inventory envelopes and removal responses carry the observed identity;
-the controller/registry must pin and validate it, including empty inventory.
-
-Deletion uses the separate `RemoveVolumeBound` RPC so older runners answer
-`Unimplemented` without reaching a handler that ignores the new precondition.
-This runner refuses `RemoveVolumeChecked` before any Kubernetes access. Callers
-must never fall back to that older method or name-only deletion.
-
-When `rbac.create=true`, the chart adds a separate ClusterRole/Binding granting
-only `get` on the named `workloadNamespace` object. It grants no namespace list,
-write or other-namespace access. `workloadNamespace` must match `KUBE_NAMESPACE`;
-when managing RBAC externally, install the same scoped permission. A namespace
-Role alone cannot grant access to the cluster-scoped namespace object. See
+When managing RBAC externally, install the scoped namespace permission in
+[volume-backend-rbac.yaml](charts/k8s-runner/templates/volume-backend-rbac.yaml)
+as well as the [workload rules](charts/k8s-runner/values.yaml).
+`workloadNamespace` must match `KUBE_NAMESPACE`. A namespace Role alone cannot
+grant access to the cluster-scoped namespace object. See
 [Kubernetes named-resource RBAC](https://kubernetes.io/docs/reference/access-authn-authz/rbac/#referring-to-resources).
 
-All 186 independent race tests, including the Helm rendering check, pass; build
-and vet pass. Wrong/unavailable namespaces, inventory/absence races and runner
-restart are covered. A separate controller/registry acceptance uses real
-Kubernetes and PostgreSQL. Those backend-identity checks alone do not authenticate the runner
-route, bind workload-start requests, fence delayed operations, protect cloned
-cluster identities or perform a rollout/adoption. It is not a drop-in upgrade.
+Historical backend-identity acceptance: all 186 independent race tests, including
+the Helm rendering check, pass; build and vet pass. Wrong/unavailable namespaces,
+inventory/absence races and runner restart are covered. A separate
+controller/registry acceptance uses real Kubernetes and PostgreSQL. Those
+backend-identity checks alone do not authenticate the runner route, bind
+workload-start requests, fence delayed operations, protect cloned cluster
+identities or perform a rollout/adoption. It is not a drop-in upgrade.
 
 ## Checked Volume Removal
 
-This branch requires the proposed checked-volume API. `ListVolumes` additionally
-returns each PVC UID and only persistent identity labels; workload/turn labels
-and unrelated metadata are not included in that identity.
-
-`RemoveVolumeBound` validates the durable expected name, key, UID and complete
-persistent ownership labels against a fresh GET, then uses that UID and the GET's
-resource version as Kubernetes delete preconditions. It refuses missing identity,
-foreign/replacement claims and claims with owner references. Conflicts are not
-retried against a different target. A terminating claim or DELETE acknowledgement
-returns `PENDING`; only GET/NotFound returns `ABSENT`. It never clears finalizers.
-
-Legacy `RemoveVolume` returns `FailedPrecondition`. So does
-`RemoveWorkload(remove_volumes=true)`, before touching a Pod, Secret or PVC.
-There is no compatibility escape flag. Ordinary workload removal retains disks.
+See [volume_removal.go](internal/server/volume_removal.go) and
+[anchored_volume_removal.go](internal/server/anchored_volume_removal.go).
 Deploy only after coordinating the API, durable registry intents and every
 orchestrator/sandbox cleanup caller. This branch is not a stock-image drop-in.
 
-Unit tests assert both delete preconditions, replacement/ownership conflicts,
-finalizer handling, backend failures and bypass rejection. The Kubernetes fake
-does not itself enforce preconditions; native acceptance is required separately.
+The Kubernetes fake does not itself enforce delete preconditions; native
+acceptance is required separately from [unit tests](internal/server/volume_removal_test.go).
 Caller authentication, durable intent storage, all-writer/late-create and
 node/storage fencing are not implemented by this runner change alone.
 
 ### Native checked-removal acceptance
 
-The local integration branch extends the existing isolated PVC ownership fixture:
+The [native removal fixture](internal/server/volume_removal_live_test.go) runs
+within the [PVC fixture](internal/server/pvc_live_test.go). Use only an explicitly
+authorized disposable local cluster; see [operator permissions](#persistent-claim-reuse).
 
 ```sh
 RUNNER_LIVE_PVC_TEST=trusted-local \
@@ -103,39 +76,24 @@ RUNNER_LIVE_KUBECONFIG=/absolute/path/to/local-kubeconfig \
 go test -race ./internal/server -run '^TestLivePVCOwnership$' -count=1 -timeout=5m
 ```
 
-It creates a unique namespace, uses the chart's service-account permissions and
-forbids Pods. Its 1 MiB claims name an absent storage class, so no backing disks
-are provisioned. The removal subtest calls the real runner through loopback
-gRPC, exposing only inventory and checked/legacy deletion methods. It verifies
-pending finalization, confirmed absence and stale retries after name reuse.
-Controlled native mutations between GET and DELETE verify Kubernetes HTTP 409
-for both a replacement UID and an ownership change with the same UID.
-
-The fixture releases only its own synthetic finalizer on its own unbacked claim;
-it never strips Kubernetes protection or unrelated finalizers. Cleanup checks
-namespace/resource ownership and absence of backing storage before deleting the
-fixture namespace, then waits for absence. No platform deployment, existing
-workspace, agent or provider credential is involved. This is not a deployed
-orchestrator/registry/A2A deletion test. The fixture commit is an integration
-artifact, separate from the focused runner production patch and unit tests.
+This fixture is restricted to unbacked claims, synthetic finalizers and no Pods.
+Do not use installed workspaces or strip Kubernetes/unrelated finalizers to
+complete cleanup. Native-only checks are not deployed orchestrator/registry/A2A
+acceptance. The fixture commit is an integration artifact, separate from the
+focused runner production patch and unit tests.
 
 ## Prepared Workloads
 
-The dependent [two-phase native lifecycle](PREPARED-WORKLOADS.md) prepares gated
-Pods, verifies immutable backend/workspace bindings before activation, and
-retains per-Pod claim protection until confirmed removal. It requires the new
-API, Kubernetes >=1.30 and additional namespaced PVC/Secret patch permissions.
+See [Prepared Workloads](PREPARED-WORKLOADS.md) for API, Kubernetes and RBAC
+prerequisites and historical native acceptance.
 Control-plane persistence/caller migration, reconciliation, authenticated
 enforcement and coordinated A2A rollout remain pending. It is not a drop-in image.
 
 ## Control Transport
 
-With `ZITI_ENABLED=true`, the full RunnerService is served only on the OpenZiti
-listener. The plaintext `GRPC_ADDR` listener accepts only the exact unary
-`RunnerService.Ready` RPC; other unary methods and all streams return
-`Unauthenticated`. Request headers cannot opt into control access. Existing
-TCP health probes still connect, but neither TCP connectivity nor `Ready`
-proves successful enrollment or an available overlay terminator.
+Listener access rules live in [transports.go](cmd/k8s-runner/transports.go).
+Neither TCP connectivity nor `Ready` proves successful enrollment or an
+available overlay terminator.
 
 Previously both listeners shared a full gRPC server, so a client that could
 reach the TCP port could bypass the overlay's service-access policy. Network
@@ -151,20 +109,12 @@ development or independently protected deployments; this patch does not make
 that mode suitable for untrusted agents. Production must enforce the intended
 transport profile and audit overlay policies and all callers.
 
-Listener separation applies before enrollment starts. Failed startup stops both
-servers, without leaving a plaintext fallback. There is no new API, credential
-format, deployment flag, runtime prompt or workflow dependency.
-
-Verification uses real loopback gRPC connections and a child process running the
-production startup path. It covers every generated unary/streaming RPC,
-forged metadata, similarly named/future service methods, control and standalone
-success, pending/failed enrollment and observed listener closure. The startup
-fixture replaces only the Kubernetes client constructor and uses a blocked
-loopback Gateway stub; it inherits no host, cluster or provider credentials.
-It performs no real Kubernetes operations, enrollment, model calls or deployment
-changes. On the independent transport branch, full `go test -race ./...` passes
-152 tests including subtests; the child
-entry point runs only when launched by its parent test. Build and vet also pass.
+The [transport tests](cmd/k8s-runner/transports_test.go) and
+[startup process fixture](cmd/k8s-runner/transports_process_test.go) use loopback
+connections, not real Kubernetes operations, enrollment or provider calls.
+Historical acceptance on the independent transport branch: full
+`go test -race ./...` passes 152 tests including subtests; the child entry point
+runs only when launched by its parent test. Build and vet also pass.
 
 This is not an audit of live Dial/Bind policies, real overlay reconnection or
 revocation, per-owner authorization, runner/backend incarnation binding,
@@ -178,6 +128,11 @@ Full setup: [Local Development](https://github.com/agynio/architecture/blob/main
 
 ### Prepare environment
 
+Use an explicitly selected development cluster and permission to change its
+platform deployments. Install the tools required by the linked bootstrap guide;
+the Go toolchain requirement is in [go.mod](go.mod), and API generation uses
+[Buf](buf.gen.yaml). The setup below changes cluster state.
+
 ```bash
 git clone https://github.com/agynio/bootstrap.git
 cd bootstrap
@@ -188,6 +143,10 @@ chmod +x apply.sh
 See [bootstrap](https://github.com/agynio/bootstrap) for details.
 
 ### Run from sources
+
+Use the checked-in [DevSpace workflow](devspace.yaml) after bootstrap. Its
+published-schema generation is not a substitute for the matching local API
+required by this contribution stack.
 
 ```bash
 # Deploy once (exit when healthy)
@@ -211,37 +170,12 @@ transmits the selected environment flavor's bounds. Upgrade the API, runner,
 then orchestrator before opting an agent profile in. Older runners must reject
 the unknown required capability, rather than silently ignore new protobuf fields.
 
-Set `SUPPORTING_CONTAINER_RESOURCES` to an explicit operator-owned JSON object:
-
-```json
-{"requestsCpu":"50m","requestsMemory":"64Mi","limitsCpu":"500m","limitsMemory":"256Mi"}
-```
-
-These are example bounds, not built-in defaults or production sizing advice.
-Invalid configuration fails startup. The runner advertises `compute-resources`
-only when valid supporting bounds are configured. An empty/unset variable
-disables it, even if the catalog lists the capability.
-
-Requests requiring this capability must include all four main-container fields.
-Supporting containers can omit the entire resource message to use the configured
-bounds, but explicit empty/partial messages are rejected. This includes normal
-sidecars, init containers, restartable init containers and Docker containers
-injected by the runner. Every quantity must be positive, representable, use
-whole millicores/bytes, and have its request no greater than its limit. Validation
-occurs before Kubernetes access, including PVC or secret creation. Resource
-fields without the required capability are rejected. Legacy requests with
-neither the capability nor fields retain their previous behavior.
-
-With upstream `StartWorkloadRequest.flavor`, the runner validates the named
-catalog entry before creating any Kubernetes object. Explicit capability-gated
-container bounds take precedence over flavor defaults; a flavor supplies main
-and ordinary-sidecar bounds only where no explicit resources are present.
-`compute-resources` still requires complete explicit main bounds. Operator
-supporting bounds then cover any remaining containers, including init,
-restartable init and capability-injected containers. Flavor-only callers retain
-upstream behavior, including unsized init containers; they are not implicitly
-opted into the stricter capability. Unknown/invalid flavors fail even when
-explicit bounds were also supplied.
+Choose operator-owned `SUPPORTING_CONTAINER_RESOURCES` bounds for the intended
+workload pool. The JSON schema and validation are in
+[ComputeResources](internal/config/catalog.go) and
+[compute_resources.go](internal/config/compute_resources.go); request enforcement
+and flavor compatibility are in [workload.go](internal/server/workload.go) and
+the [compatibility tests](internal/server/flavor_compatibility_test.go).
 
 Bounds are **per container**, not one shared task budget. Supporting-container
 allocations are additional to the main flavor. This does not limit the number
@@ -252,7 +186,8 @@ aggregate quotas and adversarial sandboxing remain separate concerns.
 ### Local API generation and enforcement test
 
 Until the API addition is published to BSR, generate against sibling source
-checkouts instead of the default published input:
+checkouts instead of the default published input. Use the rebased API revision
+named at the top of this guide; adjust sibling checkout names as needed:
 
 ```bash
 cd ../api
@@ -263,13 +198,10 @@ cd ../k8s-runner
 go test ./...
 ```
 
-The opt-in Linux/cgroup-v2 test uses an explicitly selected trusted test cluster,
-a digest-pinned Node.js image and its own temporary namespace. It calls the real
-runner over loopback gRPC, checks cgroups before stress, then checks CPU
-throttling, a bounded OOM kill, supporting-container cgroups and a healthy
-neighbor. It uses no PVCs, model credentials or external Pod networking. Cleanup
-verifies Pod and namespace removal and refuses foreign Pod/PVC ownership.
-Ordinary tests skip it. Only run against a disposable local lab:
+The [enforcement fixture](internal/server/compute_resources_live_test.go) requires
+Linux/cgroup-v2, a digest-pinned Node.js image and authorization for a disposable
+local cluster. It deliberately stresses CPU and causes a bounded OOM kill; never
+run it against installed workloads or with provider credentials.
 
 ```bash
 RUNNER_LIVE_RESOURCE_TEST=trusted-local \
@@ -283,41 +215,19 @@ security. See Kubernetes' [CPU and memory enforcement](https://kubernetes.io/doc
 
 ## Failed Startup Secrets
 
-Pull and inline-file secrets carry a unique `agyn.io/startup-attempt` annotation.
-On a rejected startup, the runner cleans up that attempt's temporary secrets,
-including failures during PVC provisioning and partial secret creation. Durable
-PVCs are deliberately retained for their separate volume lifecycle.
+Rollback and uncertain-create rules live in
+[startup_secrets.go](internal/server/startup_secrets.go).
 
 Deploy the chart's updated Secret rule before the new runner image: cleanup
 requires `get` in addition to `create` and `delete` in the workload namespace.
-No Secret `list` or `watch` permission is added. Operators overriding `rbac.rules`
-must update their rule explicitly; an image-only rollout is insufficient.
+Operators overriding `rbac.rules` must update their rule explicitly; an image-only
+rollout is insufficient. An unconfirmed cleanup diagnostic is not retry authority.
 
-Cleanup uses a fresh, five-second context even if the RPC caller canceled. It
-checks Pod absence, secret ownership/content and recorded UIDs, deletes with UID
-and resource-version preconditions, and observes absence. A conflicting secret
-is never adopted. A lost secret-create acknowledgement can be reconciled only
-when the exact attempt's object is found. Conflicts, changed resources and held
-deletions remain unconfirmed; cleanup never removes finalizers or retries writes.
-
-A timeout, disconnect or server error during Pod creation may still mean a Pod
-was accepted. Its secrets are retained even if a subsequent read would say
-NotFound. The original gRPC failure code is preserved; unconfirmed cleanup adds
-`startup_secret_cleanup_unconfirmed` to the diagnostic and logs the workload and
-attempt IDs without dumping secret contents. This is not a retry authorization.
-
-The opt-in test exercises native PVC count/storage, Secret count and Pod count
-quota rejection through loopback RunnerService gRPC. It uses synthetic secrets,
-a new namespace, an absent unique StorageClass and a zero-Pod quota throughout.
-Runner calls impersonate a dedicated service account bound to the chart's rules
-in the fixture namespace, not the operator's administrator identity. Secret list
-access must remain forbidden. The operator kubeconfig must be able to create
-the fixture's ServiceAccount/Role/RoleBinding and impersonate that account.
-No image is pulled, no agent runs and no existing
-PVC is changed. It also verifies
-that an explicit second request reuses a partially created claim by UID/spec.
-Cleanup refuses unknown namespace/resource ownership. Use only a trusted local
-test cluster:
+The [native startup fixture](internal/server/startup_secrets_live_test.go) requires
+a trusted disposable cluster and permission to create a namespace and its
+ServiceAccount/Role/RoleBinding and impersonate that account. Use only synthetic
+credentials and unbacked claims; no existing workspace or agent belongs in this
+fixture.
 
 ```bash
 RUNNER_LIVE_STARTUP_TEST=trusted-local \
@@ -330,32 +240,71 @@ and post-success Stop/Remove cleanup are separate lifecycle work. This change
 does not add a garbage collector, delete durable workspaces, change the Runner
 API, or establish end-to-end A2A recovery under first-provision rejection.
 
+## Workload Secret Release
+
+Until now only Stop/Remove deleted a started workload's pull and inline-file
+Secrets, by name from the Pod annotation, logging failures only. A Pod removed
+otherwise (by an operator or Pod garbage collection, or by a Stop whose Secret
+deletion then failed, which a retry sees as NotFound) left them behind. A
+leftover name also made a restart of that workload ID fail with `AlreadyExists`.
+
+A legacy (ungated) Pod needs its credentials before it is admitted, so they
+cannot carry its UID in their CREATE as prepared Secrets do. After the Pod
+CREATE returns, each Secret gets a Pod owner reference by a JSON patch that
+tests the UID and resource version this attempt created. A delayed or retried
+patch therefore fails rather than claiming a replacement. The owner is the
+returned Pod UID; if that Pod is already gone, garbage collection removes a
+Secret nothing can use. From then on, deleting the Pod by any actor releases its
+Secrets. A failed patch is logged with the workload ID and Secret names and does
+not fail a start whose Pod exists. Stop/Remove still delete by name, now with
+a five-second context that survives caller cancellation, logging each failure.
+
+An ownerless Secret remains possible after a crash or failure between the two
+writes, after an uncertain Pod CREATE, or from an earlier runner. The opt-in
+orphan sweep (`workloadSecretSweep.enabled`, default off) releases one only if
+all of the following hold:
+
+- It is in the workload namespace with `app.kubernetes.io/managed-by=k8s-runner`,
+  a UUID `agyn.io/workload-id`, the exact `workload-<id>-pull[-N]` or
+  `workload-<id>-inline-files` name and an `agyn.io/startup-attempt` annotation.
+- It has no owner references, finalizers, deletion timestamp, or prepared or
+  anchor annotation. Owned Secrets are left to garbage collection.
+- It is older than the grace period, no start for that ID is running in this
+  process, and a direct GET of `workload-<id>` returns NotFound.
+
+Deletion uses the listed UID and resource version as preconditions, so a
+Secret changed after the listing is kept. Each deletion is logged with the
+workload ID and Secret name only. A pass lists metadata, never Secret data, and
+is bounded to 50 pages, 100 deletions and two minutes. It runs at startup and
+every `interval` (default 5m, minimum 5s). `grace` (default 10m, minimum 1m) must
+outlast a start's gap between credential and Pod writes, including clock skew.
+Secrets from runners older than the startup-attempt annotation are never swept.
+
+Enabling the sweep adds a separate list-only Secret rule to the workload grant
+and sets `WORKLOAD_SECRET_SWEEP_INTERVAL` and `WORKLOAD_SECRET_SWEEP_GRACE`.
+RBAC cannot express a metadata-only list, so this grants Secret list in the
+workload namespace; the default chart still grants none. Owner patches need the
+existing Secret `patch` verb. External RBAC must supply the same rules.
+
+The E2E grants the source chart's workload rules in the disposable VM with a
+15s interval and 1m grace. It plants an ownerless orphan and near-misses,
+requires the orphan's logged release and the near-misses' survival, requires
+every runner Secret of a live Pod to be owned by exactly that Pod, and deletes
+one such Pod outside the runner to observe garbage collection release its
+Secrets. Unit tests cover the patch preconditions, cancellation, every retention
+rule, in-flight starts, changed Secrets, bounds and idempotence.
+
 ## Persistent claim reuse
 
-Every named `VolumeSpec` must supply a nonempty `labels.volume_key`, identifying
-its durable volume record. Current Agyn orchestrator requests already do this.
-Custom callers must set a stable, owner-specific key before upgrading; a key
-derived from a transient Pod/workload ID would break workspace continuation.
-Unkeyed named-volume requests are now rejected, even if that claim exists.
+Custom callers must set a stable, owner-specific `labels.volume_key` before
+upgrading; a key derived from a transient Pod/workload ID would break workspace
+continuation.
 
-An existing claim must retain the same key, runner/orchestrator management
-labels, and any agent-instance, agent-class, sandbox or sandbox-owner labels.
-Per-volume labels cannot override conflicting workload ownership labels.
-Per-start workload IDs and thread IDs do not participate in ownership matching.
-Missing or conflicting identity returns `FailedPrecondition` before Pod creation;
-the runner never adopts, relabels, renames or deletes the conflicting claim.
-Legacy claims missing identity require an audited operator reconciliation, not
-automatic backfilling or a new empty workspace.
-
-Validation applies to an ordinary lookup, a successful creation response and a
-fresh lookup after a competing create returns `AlreadyExists`. Uncertain API
-errors are returned, not treated as absence or permission to recreate storage.
-Deleting/lost claims and claims with garbage-collection owner references are
-rejected. Reuse requires a filesystem, compatible single-node/single-Pod access
-mode, sufficient requested capacity and a matching explicitly selected storage
-class. An unspecified class retains the cluster's original choice. Larger
-claims are preserved without resizing. Pending claims are permitted because
-binding may require the workload to be scheduled first.
+See [pvc.go](internal/server/pvc.go) and
+[prepared_workload.go](internal/server/prepared_workload.go) for reuse contracts,
+and [Existing Workspace Adoption](VOLUME-ANCHOR-ADOPTION.md) for migration gates.
+Legacy claims missing identity require audited operator reconciliation, not
+relabeling or a new empty workspace.
 
 These checks do not authenticate RPC callers, fence old workloads or prevent a
 privileged writer from replacing a claim after validation. `ReadWriteOnce` is
@@ -365,12 +314,9 @@ Admission controls, lifecycle fencing and secure RPC authorization remain
 separate requirements. Startup Secret rollback is a separate change; deployments
 using pull credentials should include that fix when enabling these rejections.
 
-The ordinary Go suite covers mismatched/missing ownership, unchanged reuse,
-validation before lookup, creation races and uncertain errors. The opt-in native
-test uses the chart's service-account permissions, a unique owned namespace,
-an absent storage class and a zero-Pod quota. No agent/image or existing
-workspace is used. Eight real API reads are held after `404` responses before
-competing creates verify that exactly one claim identity is retained:
+The [native PVC fixture](internal/server/pvc_live_test.go) requires a disposable
+local cluster, namespace/RBAC creation and impersonation rights. It must remain
+restricted to unbacked claims and no Pods, never installed workspaces.
 
 ```sh
 RUNNER_LIVE_PVC_TEST=trusted-local \
@@ -378,106 +324,53 @@ RUNNER_LIVE_KUBECONFIG=/absolute/path/to/test-kubeconfig \
 go test -race ./internal/server -run '^TestLivePVCOwnership$' -count=1 -timeout=4m -v
 ```
 
-The operator needs namespace/RBAC creation and impersonation rights. Cleanup
-checks namespace/object UIDs and refuses to remove unexpected resources or
-claims that acquired backing storage. Test configuration must explicitly select
-the intended disposable local cluster; it never uses a default kubeconfig.
-Controller-injected Kubernetes/Istio CAs and trust-manager bundles are accepted
-only with certificate-only contents. Trust-manager bundles also require the
-matching controller UID, bundle label and content hash; reading that controller's
-metadata requires operator permission. Other injected objects prevent cleanup.
+Explicitly select the intended cluster; do not use a default kubeconfig. Where
+trust-manager injects CA bundles, the operator also needs permission to read
+the controller metadata. Investigate unexpected injected objects or backed
+claims instead of bypassing the fixture's cleanup refusal.
 
 ## Docker capability notes
 
-The `docker` capability injects a Docker sidecar. For the **rootless**
-implementation, the sidecar runs nested `runc` and requires additional
-permissions and mounts to allow `docker run` to work:
-
-- `allowPrivilegeEscalation: true` for rootlesskit/newuidmap.
-- `seccompProfile: Unconfined` and `appArmorProfile: Unconfined` because
-  default RuntimeDefault/AppArmor profiles block mount-related syscalls
-  (for example mounting `/proc`) required by nested `runc`.
-- `procMount: Unmasked` to avoid `/proc` mount masking interfering with
-  nested `runc` container setup.
-- `pod.spec.hostUsers: false` with an init container that writes
-  `/etc/subuid` and `/etc/subgid` entries inside the pod user namespace.
-- HostPath mount for `/dev/net/tun` (type `CharDevice`).
-- `docker-data` emptyDir mounted at `/home/rootless/.local/share` so dockerd
-  can create its own `docker/` data root with correct ownership.
-
-These settings can require Pod Security Admission exceptions for docker-capable
-workloads (baseline/restricted clusters may reject them).
+Review [capabilities.go](internal/server/capabilities.go) before enabling Docker.
+Even the rootless implementation can require Pod Security Admission exceptions;
+baseline/restricted clusters may reject it. Rootless Docker is not a substitute
+for the deployment's sandboxing policy.
 
 ### Kata (microVM) docker runtimes
 
-`CAPABILITY_IMPLEMENTATIONS` also supports `docker: kata-qemu` (and optionally
-`docker: kata-fc`). When enabled, k8s-runner keeps the privileged DinD sidecar
-behavior but sets `pod.spec.runtimeClassName` to match the selected Kata
-implementation. The cluster must provide the matching RuntimeClass and schedule
-onto KVM-capable nodes. This cannot be validated on local k3d/mac setups.
+For a Kata implementation selected through `CAPABILITY_IMPLEMENTATIONS`, the
+cluster must provide the matching RuntimeClass and schedule onto KVM-capable
+nodes. This cannot be validated on local k3d/mac setups.
 
 ## Workload ResourceQuota
 
-`workloadResourceQuota` adds an opt-in, namespace-wide Kubernetes admission
-budget. It is disabled by default and has no implicit resource allowance.
-Enabling it requires all four CPU/memory totals plus `count/pods`:
-
-```yaml
-workloadNamespace: agyn-workloads
-workloadResourceQuota:
-  enabled: true
-  name: agent-workload-budget
-  hard:
-    requests.cpu: "2"
-    requests.memory: "2Gi"
-    limits.cpu: "4"
-    limits.memory: "4Gi"
-    count/pods: "8"
-```
-
-These are example values, not production sizing recommendations. The quota
-applies to every Pod in `workloadNamespace`, including workloads created by
-other runner instances or tools; it has no agent label selector or scope filter.
-Kubernetes evaluates the assembled Pod, including the effective init/sidecar
-budget, rather than trusting a main-container flavor as a complete task cost.
+Configure `workloadResourceQuota` using [chart values](charts/k8s-runner/values.yaml)
+and the [quota template](charts/k8s-runner/templates/workload-resourcequota.yaml).
+Size the entire namespace, including other producers and init/sidecar costs;
+a main-container flavor is not a complete task budget.
 See [ResourceQuota](https://v1-33.docs.kubernetes.io/docs/concepts/policy/resource-quotas/)
 and [sidecar accounting](https://v1-33.docs.kubernetes.io/docs/concepts/workloads/pods/sidecar-containers/#resource-sharing-within-containers).
 
-The runner's rendered environment must contain exactly one literal
-`KUBE_NAMESPACE` matching `workloadNamespace`. A missing, dynamic, duplicate or
-mismatched binding fails Helm rendering. Update the existing `env` entry when
-changing the workload namespace; do not add a second entry in `extraEnvVars`.
-The policy does not change the runner's command, security context, RBAC or
-resource allocations. Protect both the quota and runner configuration with
-operator RBAC; this is not protection against a cluster administrator changing
-or deleting them.
+Update the existing `KUBE_NAMESPACE` entry when changing `workloadNamespace`;
+do not add a second entry in `extraEnvVars`. Protect quota and runner configuration
+with operator RBAC; this is not protection against a cluster administrator
+changing or deleting them.
 
 Install and verify the quota before enabling workload producers. The selected
 runner and workload profile must provide CPU and memory requests and limits
-for every main, init and supporting container: this policy deliberately does
-not inject fallback container limits. A legacy unbounded Pod is rejected, not
-silently admitted. On quota rejection Kubernetes returns `403 Forbidden`; the
-existing runner maps this to gRPC `PermissionDenied` with the Kubernetes status
-message. This contribution does not reclassify errors or add automatic retries.
+for every main, init and supporting container. Do not assume legacy workload
+profiles can run under the budget.
 The caller must retain durable state and distinguish a rejected start from an
 ambiguous operation before attempting recovery.
 
-CPU/memory quotas cover nonterminal Pods. `count/pods` also bounds retained Pod
-objects, so failed objects cannot accumulate without consuming object capacity.
-Additional native quota keys, such as `count/persistentvolumeclaims`, are passed
-through; Kubernetes validates their quantities. A PVC count or requested-storage
-quota is not enforcement of bytes written inside a filesystem. This is also
-not a task scheduler, tenant fairness policy, node partition fence, PID/IO cap,
-or proof of fail-closed platform bootstrap. Inspect existing namespace usage and
-all producers before adopting a budget; no resources or retained volumes are
-deleted by this chart feature.
+Account for retained Pod objects as well as running compute. A PVC count or
+requested-storage quota is not enforcement of bytes written inside a filesystem.
+This is also not a task scheduler, tenant fairness policy, node partition fence,
+PID/IO cap, or proof of fail-closed platform bootstrap. Inspect existing namespace
+usage and all producers before adopting a budget.
 
-Structured render checks use the existing Kubernetes YAML/types and run in CI:
-
-```sh
-helm dependency build charts/k8s-runner
-go test ./internal/chart -count=1
-```
+Render validation is maintained in the [chart tests](internal/chart/quota_test.go)
+and [CI chart check](scripts/verify-workload-egress-networkpolicy.sh).
 
 The chart contribution is independent of A2A and agent runtimes. Live runner
 admission, including supporting-container accounting and release/reuse, needs
@@ -486,12 +379,10 @@ separate acceptance with the resource-aware integration build.
 ### Combined local quota acceptance
 
 This lab branch combines the separate chart and container-resource contributions;
-it is not a proposed bundled upstream change. `TestLiveWorkloadQuota` renders
-the real chart into its own temporary namespace and uses a real loopback gRPC
-RunnerService backed by Kubernetes. It requires a digest-pinned Node image whose
-default user is UID 1000. Every probe checks its UID and actual cgroup bounds.
-No provider credentials, agent calls, PVCs, host mounts or stress loops are used.
-The namespace has deny-all network policies; this is not a separate CNI proof.
+it is not a proposed bundled upstream change. The
+[quota fixture](internal/server/compute_quota_live_test.go) requires a digest-pinned
+Node image whose default user is UID 1000. Its native-only scope is not a separate
+CNI proof or provider/agent acceptance.
 
 After local API generation and `helm dependency build charts/k8s-runner`, load
 the non-root probe image into the explicitly selected trusted local cluster:
@@ -518,84 +409,33 @@ quota rejection, node fencing, production sizing or hardened agent execution.
 
 ## Workload egress NetworkPolicy
 
-The Helm chart can install the static egress NetworkPolicy used by egress v1.
-Enable `workloadEgressNetworkPolicy.enabled` and set `workloadNamespace` to the
-namespace where runner-created workload pods run. The policy selects workload
-pods with `agyn.dev/managed-by=agents-orchestrator`, allows OpenZiti synthetic
-addresses (`100.64.0.0/10`), cluster DNS, and public internet, and excludes
-`workloadEgressNetworkPolicy.clusterPodCIDR`,
-`workloadEgressNetworkPolicy.clusterServiceCIDR`, and
-`workloadEgressNetworkPolicy.additionalInternalCIDRs` from public internet
-egress. `blockedCIDRs` remains as a deprecated compatibility alias.
+Use [chart values](charts/k8s-runner/values.yaml) for the supported underlay
+options and port-selection rationale, and the
+[egress template](charts/k8s-runner/templates/workload-egress-networkpolicy.yaml)
+for the rendered rules. Supply the actual workload namespace, cluster Pod/Service
+CIDRs and additional internal ranges for the installation.
 
-Ziti underlay egress is configured with first-class chart values. Enable
-`zitiWorkloadDNS` to allow workload pods to reach the Ziti workload DNS pods on
-TCP/UDP 53. Configure `zitiUnderlay.endpoints` for the enrollment controller,
-runtime Istio ingress gateway, and router underlay endpoints returned by
-`ziti-workload-dns`. Each endpoint can allow a concrete service ClusterIP `/32`,
-endpoint/backend pod CIDRs through `backendCIDRs`, a namespace/pod selector,
-or a combination. Runtime `ziti.<base-domain>:443` resolves to
-the Istio ingress gateway so TLS passthrough can route SNI to the controller
-client service. This keeps `.agyn` application traffic on the overlay while
-allowing only the underlay endpoints required for sidecar startup:
+Bootstrap must coordinate `ziti-workload-dns`, the enrollment controller, router
+and any runtime Istio ingress gateway. Derive endpoint CIDRs/selectors from the
+live `ziti-controller-client`, `ziti-router-edge` and `istio-ingressgateway`
+services and their backends, not copied lab addresses. When narrowing ports,
+review the deployed backend ports using the guidance in chart values.
 
-```yaml
-workloadEgressNetworkPolicy:
-  zitiWorkloadDNS:
-    enabled: true
-  zitiUnderlay:
-    endpoints:
-      - name: controller
-        cidr: "10.43.245.186/32"
-        port: 2496
-      - name: ingress-gateway
-        cidr: "10.43.245.188/32"
-        backendCIDRs:
-          - "10.42.2.4/32"
-        namespaceSelector:
-          kubernetes.io/metadata.name: istio-system
-        podSelector:
-          istio: ingressgateway
-        port: 443
-      - name: router
-        cidr: "10.43.245.187/32"
-        port: 2496
-```
-
-Bootstrap should derive the underlay endpoint CIDRs from the live
-`ziti-controller-client`, `istio-ingressgateway`, and `ziti-router-edge`
-ClusterIPs. For the runtime ingress gateway endpoint, bootstrap should also
-set endpoint pod CIDRs and the Istio ingress gateway namespace/pod selectors
-when available so CNIs can follow endpoint pods instead of only the Service
-ClusterIP. Set the controller and router ports to the configured
-OpenZiti underlay port, and set the runtime ingress gateway port to `443`.
-The deprecated `zitiControllerEnrollment` and `zitiRuntimeIngressGateway` values
-remain as named compatibility helpers for deployments that prefer fixed keys.
-`zitiRuntimeIngressGateway` accepts the same runtime backend CIDR and selector
-fields as `zitiUnderlay.endpoints`, but new bootstrap config should use
-`zitiUnderlay.endpoints` for the complete endpoint set.
-
-The runner runtime does not create or update NetworkPolicy resources, and its
-ServiceAccount does not need `networkpolicies` RBAC.
+Where runtime `ziti.<base-domain>:443` uses Istio TLS passthrough, retain its SNI
+route to the controller client service while keeping `.agyn` application traffic
+on the overlay. Verify enrollment and runtime access against the installed CNI;
+the [render check](scripts/verify-workload-egress-networkpolicy.sh) does not prove
+live routing or enforcement.
 
 ## Workload ingress isolation
 
 Egress restrictions alone do not prevent other pods from opening connections to
 a workload. For installations whose workload access uses outbound OpenZiti
-connections, opt in to a separate default-deny ingress policy:
-
-```yaml
-workloadNamespace: agyn-workloads
-workloadIngressNetworkPolicy:
-  enabled: true
-```
-
-This policy selects `agyn.dev/managed-by=agents-orchestrator` by default. It does
-not select the runner service, add runtime RBAC, or change egress. It is disabled
-by default to preserve installations with direct workload ingress. Operators can
-set `name` and a nonempty `podSelectorLabels` map; an empty rendered selector is
-rejected to avoid accidentally isolating the entire namespace. Helm merges
-selector maps with defaults; set a default key to `null` to remove that key.
+connections, opt in through `workloadIngressNetworkPolicy` in
+[chart values](charts/k8s-runner/values.yaml). Review the
+[ingress template](charts/k8s-runner/templates/workload-ingress-networkpolicy.yaml)
+against any direct-ingress requirements before enabling it. Helm merges selector
+maps with defaults; set a default key to `null` to remove that key.
 
 Verify live direct Pod-IP and Service-IP connections from another pod are denied,
 with working listeners and positive controls, and verify overlay enrollment,

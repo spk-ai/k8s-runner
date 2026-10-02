@@ -53,6 +53,13 @@ func (s *Server) claimVolumeRetirement(ctx context.Context, owner *corev1.Config
 	return patched, nil
 }
 
+// RemoveVolumeAnchored requires durable registry intent and excluded admission.
+// Pin the original PVC UID on its exact owner, delete conditionally, observe PVC
+// absence, then retire the owner. Holds return PENDING; ABSENT needs both objects
+// absent in the pinned backend. Never retarget replacement owners or different-UID
+// late children; observe owner-based GC. This is not between-turn compute release.
+// @see runners::internal/server/anchored_volume_removal
+// @see orchestrator::internal/reconciler/anchored_volume_removal
 func (s *Server) RemoveVolumeAnchored(ctx context.Context, req *runnerv1.RemoveVolumeAnchoredRequest) (*runnerv1.RemoveVolumeAnchoredResponse, error) {
 	if err := validateVolumeRemovalTarget(req.GetExpected()); err != nil {
 		return nil, err

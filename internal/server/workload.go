@@ -56,6 +56,9 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, status.Error(codes.InvalidArgument, "workload_id_invalid")
 	}
 	podName := podNameFromID(workloadID)
+	// Registered before any credential is written so the orphan sweep never
+	// judges this workload's Secrets while their Pod may still be created.
+	defer s.trackStart(workloadID)()
 
 	labels, err := buildLabels(workloadID, req.AdditionalProperties, req.Labels)
 	if err != nil {
@@ -126,6 +129,8 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		return nil, err
 	}
 	hostUsers := capabilityPlan.apply(&containers, &initContainers, &volumes, &sidecarNames)
+	// Keep flavor-only requests compatible with upstream; sizing init/injected
+	// containers is an explicit compute-resources opt-in.
 	if capabilityPlan.computeResources {
 		applySupportingResources(containers, initContainers, supportingResources)
 	}
@@ -202,6 +207,11 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 		if err := preparation.complete(ctx, s); err != nil {
 			return nil, err
 		}
+	} else if err := startup.attachPodOwner(ctx, createdPod); err != nil {
+		// The Pod exists and may already be running, so the start stands. Its
+		// credentials stay ownerless until Stop/Remove or the orphan sweep.
+		s.logger.Error("startup secret owner not attached", zap.String("workload_id", workloadID),
+			zap.String("startup_attempt", startup.attempt), zap.Error(err))
 	}
 
 	sidecars := make([]*runnerv1.SidecarInstance, 0, len(sidecarNames))
@@ -612,23 +622,25 @@ func (s *Server) buildImagePullSecrets(
 	return secretRefs, secretNames, nil
 }
 
+// Best effort after the Pod deletion was accepted: the RPC still succeeds. A
+// caller cancelling after that point must not skip the credential removal, so
+// it gets its own bounded context. Anything left is released by the Pod owner
+// reference or, for ownerless Secrets, by the orphan sweep.
 func (s *Server) deleteImagePullSecrets(ctx context.Context, workloadID string, secretNames []string) {
 	if len(secretNames) == 0 {
 		return
 	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
 
-	var deleteErrs []error
 	for _, secretName := range secretNames {
 		if err := s.clientset.CoreV1().Secrets(s.namespace).Delete(ctx, secretName, metav1.DeleteOptions{}); err != nil {
 			if apierrors.IsNotFound(err) {
 				continue
 			}
-			deleteErrs = append(deleteErrs, fmt.Errorf("delete secret %s: %w", secretName, err))
+			s.logger.Error("workload secret deletion failed; left to owner GC or orphan sweep", zap.String("workload_id", workloadID),
+				zap.String("secret", secretName), zap.Error(err))
 		}
-	}
-
-	if len(deleteErrs) > 0 {
-		s.logger.Error("failed to delete pull secrets", zap.String("workload_id", workloadID), zap.Errors("errors", deleteErrs))
 	}
 }
 
