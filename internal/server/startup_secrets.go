@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -20,9 +21,10 @@ import (
 const startupAttemptAnnotation = "agyn.io/startup-attempt"
 
 type startupSecret struct {
-	spec      *corev1.Secret
-	uid       types.UID
-	uncertain bool
+	spec            *corev1.Secret
+	uid             types.UID
+	resourceVersion string
+	uncertain       bool
 }
 
 // PVCs belong to the durable volume lifecycle. Only this attempt's temporary
@@ -63,8 +65,55 @@ func (s *startupSecrets) stageOrCreate(ctx context.Context, spec *corev1.Secret)
 	if created == nil || created.UID == "" {
 		return fmt.Errorf("secret_create_identity_missing")
 	}
-	entry.uid, entry.uncertain = created.UID, false
+	entry.uid, entry.resourceVersion, entry.uncertain = created.UID, created.ResourceVersion, false
 	return nil
+}
+
+// A legacy Pod is admitted ungated, so its credentials must exist before it is
+// created and cannot carry its UID in their CREATE. Without an owner they
+// outlive a Pod removed by anything other than Stop/Remove. The reference is
+// added afterwards, and only to the exact incarnation this attempt created and
+// nobody has changed since: the patch tests both UID and resource version, so a
+// delayed or retried write fails rather than claiming a replacement Secret.
+// The owner is the UID the Pod CREATE returned. If that Pod is already gone,
+// garbage collection removes the Secret, which is then unused by definition.
+// A crash or failure before this point leaves the Secret ownerless for the
+// orphan sweep; attaching never deletes anything itself.
+func (s *startupSecrets) attachPodOwner(parent context.Context, pod *corev1.Pod) error {
+	if len(s.entries) == 0 {
+		return nil
+	}
+	if s.prepared || pod == nil || pod.UID == "" || pod.Name != podNameFromID(s.workloadID) {
+		return fmt.Errorf("legacy Pod identity unavailable; startup secrets left without owner")
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(parent), 5*time.Second)
+	defer cancel()
+	owner := []metav1.OwnerReference{{APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID}}
+	secrets := s.server.clientset.CoreV1().Secrets(s.server.namespace)
+	var failures []error
+	for _, entry := range s.entries {
+		if entry.uncertain || entry.uid == "" || entry.resourceVersion == "" {
+			failures = append(failures, fmt.Errorf("startup secret %s identity unknown", entry.spec.Name))
+			continue
+		}
+		patch, err := json.Marshal([]map[string]any{
+			{"op": "test", "path": "/metadata/uid", "value": entry.uid},
+			{"op": "test", "path": "/metadata/resourceVersion", "value": entry.resourceVersion},
+			{"op": "add", "path": "/metadata/ownerReferences", "value": owner},
+		})
+		if err != nil {
+			return err
+		}
+		current, err := secrets.Patch(ctx, entry.spec.Name, types.JSONPatchType, patch, metav1.PatchOptions{})
+		if err != nil {
+			failures = append(failures, fmt.Errorf("startup secret %s owner not attached: %w", entry.spec.Name, err))
+			continue
+		}
+		if current == nil || current.UID != entry.uid || !reflect.DeepEqual(current.OwnerReferences, owner) {
+			failures = append(failures, fmt.Errorf("startup secret %s owner unconfirmed", entry.spec.Name))
+		}
+	}
+	return errors.Join(failures...)
 }
 
 // Ownership is part of CREATE, not a later PATCH that a crash could interrupt.

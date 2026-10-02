@@ -413,6 +413,11 @@ func (c startupContextSecret) Delete(ctx context.Context, name string, opts meta
 	return c.SecretInterface.Delete(ctx, name, opts)
 }
 
+func (c startupContextSecret) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts metav1.PatchOptions, subresources ...string) (*corev1.Secret, error) {
+	c.verify(ctx)
+	return c.SecretInterface.Patch(ctx, name, pt, data, opts, subresources...)
+}
+
 func TestStartupSecretsCanceledCallerStillGetsBoundedCleanup(t *testing.T) {
 	server, client, req := startupFixture(t)
 	ctx, cancel := context.WithCancel(context.Background())

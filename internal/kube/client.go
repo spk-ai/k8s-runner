@@ -4,12 +4,14 @@ import (
 	"fmt"
 
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 )
 
 // Client bundles the Kubernetes clientset and REST config used for streaming.
 type Client struct {
 	Clientset  kubernetes.Interface
+	Metadata   metadata.Interface
 	RestConfig *rest.Config
 }
 
@@ -25,5 +27,10 @@ func New() (*Client, error) {
 		return nil, fmt.Errorf("create clientset: %w", err)
 	}
 
-	return &Client{Clientset: clientset, RestConfig: config}, nil
+	metadataClient, err := metadata.NewForConfig(config)
+	if err != nil {
+		return nil, fmt.Errorf("create metadata client: %w", err)
+	}
+
+	return &Client{Clientset: clientset, Metadata: metadataClient, RestConfig: config}, nil
 }

@@ -8,7 +8,7 @@ metadata:
   labels:
 {{ include "service-base.labels" . | nindent 4 }}
 rules:
-{{ toYaml .Values.rbac.rules | nindent 2 }}
+{{ include "k8s-runner.workloadRules" . | nindent 2 }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
