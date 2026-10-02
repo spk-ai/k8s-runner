@@ -1,0 +1,78 @@
+//go:build e2e && (svc_k8s_runner || smoke)
+
+package tests
+
+import (
+	"context"
+	"fmt"
+	"testing"
+
+	runnerv1 "github.com/agynio/e2e/suites/go-core/.gen/go/agynio/api/runner/v1"
+	"github.com/stretchr/testify/require"
+	"google.golang.org/protobuf/proto"
+)
+
+// Capture the immutable backend observation once, before removal. Never relist
+// to replace a mismatched UID or backend after a removal has started.
+func nativeVolume(t *testing.T, ctx context.Context, client runnerv1.RunnerServiceClient, key string) *runnerv1.VolumeListItem {
+	t.Helper()
+	listed, err := client.ListVolumes(ctx, &runnerv1.ListVolumesRequest{})
+	require.NoError(t, err)
+	require.NotEmpty(t, listed.GetBackendId())
+	var expected *runnerv1.VolumeListItem
+	for _, item := range listed.GetVolumes() {
+		if item.GetVolumeKey() != key {
+			continue
+		}
+		require.Nil(t, expected, "ambiguous fixture volume key")
+		require.NotEmpty(t, item.GetInstanceUid())
+		require.Equal(t, listed.GetBackendId(), item.GetBackendId())
+		require.Equal(t, key, item.GetIdentityLabels()["volume_key"])
+		expected = proto.Clone(item).(*runnerv1.VolumeListItem)
+	}
+	require.NotNil(t, expected, "fixture volume absent from native inventory")
+	return expected
+}
+
+func removeNativeVolume(t *testing.T, ctx context.Context, client runnerv1.RunnerServiceClient, expected *runnerv1.VolumeListItem) {
+	t.Helper()
+	require.NoError(t, pollUntil(ctx, pollInterval, func(ctx context.Context) error {
+		removed, err := client.RemoveVolumeBound(ctx, &runnerv1.RemoveVolumeBoundRequest{Expected: expected})
+		if err != nil {
+			t.Fatalf("checked fixture volume removal: %v", err)
+		}
+		require.Equal(t, expected.GetBackendId(), removed.GetBackendId(), "removal confirmation must name the observed backend")
+		switch removed.GetState() {
+		case runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_ABSENT:
+			return nil
+		case runnerv1.VolumeRemovalState_VOLUME_REMOVAL_STATE_PENDING:
+			return fmt.Errorf("fixture volume deletion pending")
+		default:
+			t.Fatalf("unconfirmed fixture volume removal: %s", removed.GetState())
+			return nil
+		}
+	}))
+}
+
+func registerNativeFixtureCleanup(t *testing.T, client runnerv1.RunnerServiceClient, req *runnerv1.StartWorkloadRequest, workloadID string) {
+	t.Helper()
+	var expectedVolumes []*runnerv1.VolumeListItem
+	// Register both callbacks before discovery can fail. LIFO removes the pod
+	// first, then only volumes for which an immutable observation was captured.
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		for _, expected := range expectedVolumes {
+			removeNativeVolume(t, ctx, client, expected)
+		}
+	})
+	registerWorkloadCleanup(t, client, workloadID)
+	ctx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+	defer cancel()
+	for _, volume := range req.GetVolumes() {
+		if volume.GetKind() != runnerv1.VolumeKind_VOLUME_KIND_NAMED {
+			continue
+		}
+		expectedVolumes = append(expectedVolumes, nativeVolume(t, ctx, client, volume.GetLabels()["volume_key"]))
+	}
+}

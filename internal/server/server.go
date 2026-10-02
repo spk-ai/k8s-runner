@@ -6,6 +6,7 @@ import (
 
 	"go.uber.org/zap"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/metadata"
 	"k8s.io/client-go/rest"
 
 	runnerv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runner/v1"
@@ -30,10 +31,12 @@ const (
 type Server struct {
 	runnerv1.UnimplementedRunnerServiceServer
 	clientset                    kubernetes.Interface
+	metadata                     metadata.Interface
 	restConfig                   *rest.Config
 	namespace                    string
 	storageClass                 *string
 	storageSize                  string
+	workloadRuntimeClassName     string
 	catalog                      config.Catalog
 	logger                       *zap.Logger
 	capabilityImplementations    config.CapabilityImplementations
@@ -41,6 +44,9 @@ type Server struct {
 
 	execSessions   map[string]*execSession
 	execSessionsMu sync.Mutex
+
+	startsInFlight map[string]int
+	startsMu       sync.Mutex
 }
 
 // Options defines required inputs for constructing a Server.
@@ -50,25 +56,32 @@ type Options struct {
 	Namespace                    string
 	StorageClass                 *string
 	StorageSize                  string
+	WorkloadRuntimeClassName     string
 	Catalog                      config.Catalog
 	Logger                       *zap.Logger
 	CapabilityImplementations    config.CapabilityImplementations
 	SupportingContainerResources *config.ComputeResources
+	// Metadata lists workload Secrets without reading their content. Only the
+	// orphan sweep uses it.
+	Metadata metadata.Interface
 }
 
 // New constructs a RunnerService server.
 func New(options Options) *Server {
 	return &Server{
 		clientset:                    options.Clientset,
+		metadata:                     options.Metadata,
 		restConfig:                   options.RestConfig,
 		namespace:                    options.Namespace,
 		storageClass:                 options.StorageClass,
 		storageSize:                  options.StorageSize,
+		workloadRuntimeClassName:     options.WorkloadRuntimeClassName,
 		catalog:                      options.Catalog,
 		logger:                       options.Logger,
 		capabilityImplementations:    options.CapabilityImplementations,
 		supportingContainerResources: options.SupportingContainerResources,
 		execSessions:                 make(map[string]*execSession),
+		startsInFlight:               make(map[string]int),
 	}
 }
 

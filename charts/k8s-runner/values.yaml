@@ -157,6 +157,9 @@ env:
     value: "info"
 envFrom: []
 extraEnvVars: []
+# Set WORKLOAD_RUNTIME_CLASS_NAME in extraEnvVars to require an operator-chosen
+# RuntimeClass for all workloads. Conflicting capability runtimes are rejected
+# before resource creation. Empty retains the existing runtime selection.
 extraEnvVarsCM: ""
 extraEnvVarsSecret: ""
 
@@ -241,6 +244,16 @@ metrics:
 # Must match KUBE_NAMESPACE. The backend-identity ClusterRole grants only GET
 # on this namespace object; external RBAC must provide the same permission.
 workloadNamespace: agyn-workloads
+
+# Opt-in release of ownerless startup Secrets whose Pod is confirmed absent.
+# Pod-owned Secrets are released by Kubernetes garbage collection without it.
+# Enabling it adds Secret list in the workload namespace: the runner lists
+# metadata only, but RBAC cannot grant a metadata-only list.
+workloadSecretSweep:
+  enabled: false
+  interval: 5m
+  # Must outlast the gap between a start's credential and Pod writes.
+  grace: 10m
 
 # Opt in only where workload access goes through outbound overlay connections.
 # Other NetworkPolicies can still add ingress allowances to these pods.

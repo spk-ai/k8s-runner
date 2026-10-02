@@ -20,20 +20,76 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Checkout pinned E2E tooling
+        uses: actions/checkout@v4
+        with:
+          repository: agynio/e2e
+          ref: 435b549a937129b6858e7314648eb690894209fe
+          path: .e2e-tooling
+          persist-credentials: false
+
+      - name: Prepare disposable VM image repair and diagnostics
+        run: python3 .github/e2e/prepare.py .e2e-tooling
+
       - name: Provision cluster
-        uses: agynio/e2e/.github/actions/provision-vm@main
+        uses: ./.e2e-tooling/.github/actions/provision-vm
+        with:
+          agyn-cli-version: v0.19.0
 
       - name: Setup DevSpace
-        uses: agynio/e2e/.github/actions/setup-devspace@main
+        uses: agynio/e2e/.github/actions/setup-devspace@435b549a937129b6858e7314648eb690894209fe
+
+      - name: Install Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.19.4
+
+      # The VM's platform release predates the chart's volume-backend grant and
+      # the source deployment is patched in place, so apply the chart's own
+      # render. The script proves the only added permission is get on the
+      # single workload Namespace; this does not change any production RBAC.
+      - name: Grant the source chart's volume-backend namespace read
+        run: python3 .github/e2e/volume-backend-rbac.py
+
+      # The same platform release also predates Secret get/list/patch, which
+      # owner references and the orphan sweep need. The script proves the grant
+      # is the source chart's own Role, confined to the workload namespace.
+      - name: Grant the source chart's workload rules with the Secret sweep
+        run: python3 .github/e2e/workload-rbac.py
 
       - name: Deploy k8s-runner from source
+        id: deploy
         run: devspace run deploy
 
+      - name: Plant orphaned workload Secret fixtures
+        id: plant
+        run: python3 .github/e2e/secret-release.py plant
+
       - name: Run E2E tests
-        uses: agynio/e2e/.github/actions/run-tests@main
+        uses: ./.e2e-tooling/.github/actions/run-tests
         with:
+          e2e-ref: 435b549a937129b6858e7314648eb690894209fe
           service: k8s_runner
 
-      - name: Restore ArgoCD sync
+      - name: Prove workload Secrets are released with their Pod
+        if: always() && steps.plant.outcome == 'success'
+        timeout-minutes: 10
+        run: python3 .github/e2e/secret-release.py prove
+
+      - name: Verify runner-owned resources were cleaned up
+        if: always() && steps.deploy.outcome == 'success'
+        timeout-minutes: 10
+        run: python3 .github/e2e/verify-cleanup.py
+
+      # The disposable VM is Helm-owned; there is no ArgoCD sync to restore.
+      - name: Collect source deployment diagnostics
+        if: failure()
+        run: python3 .github/e2e/diagnostics.py
+
+      - name: Stop disposable platform VM
         if: always()
-        run: devspace run restore-argocd
+        timeout-minutes: 3
+        run: |
+          if command -v agyn >/dev/null 2>&1; then
+            agyn local stop
+          fi

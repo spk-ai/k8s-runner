@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 const (
@@ -17,6 +18,12 @@ const (
 	defaultZitiEnrollmentTimeout = 2 * time.Minute
 	defaultStorageSize           = "10Gi"
 	defaultLogLevel              = "info"
+	defaultSecretSweepGrace      = 10 * time.Minute
+	// A legacy start writes its credentials before its Pod. The grace must
+	// outlast that window, including an apiserver request still committing
+	// after the client gave up on it.
+	minSecretSweepGrace    = time.Minute
+	minSecretSweepInterval = 5 * time.Second
 )
 
 // Config captures runtime configuration derived from the environment.
@@ -29,9 +36,15 @@ type Config struct {
 	ZitiEnrollmentTimeout        time.Duration
 	StorageClass                 *string
 	StorageSize                  string
+	WorkloadRuntimeClassName     string
 	LogLevel                     string
 	CapabilityImplementations    CapabilityImplementations
 	SupportingContainerResources *ComputeResources
+	// SecretSweepInterval enables the ownerless workload Secret sweep when
+	// positive. It is opt-in because it needs Secret list in the workload
+	// namespace, which the chart grants only with workloadSecretSweep.enabled.
+	SecretSweepInterval time.Duration
+	SecretSweepGrace    time.Duration
 	// Catalog is what this runner reports it offers. Declared in the runner's
 	// own configuration, since every entry needs an implementation here.
 	Catalog Catalog
@@ -64,6 +77,12 @@ func Load() (Config, error) {
 	cfg.Namespace = strings.TrimSpace(os.Getenv("KUBE_NAMESPACE"))
 	if cfg.Namespace == "" {
 		return Config{}, fmt.Errorf("KUBE_NAMESPACE is required")
+	}
+	cfg.WorkloadRuntimeClassName = strings.TrimSpace(os.Getenv("WORKLOAD_RUNTIME_CLASS_NAME"))
+	if name := cfg.WorkloadRuntimeClassName; name != "" {
+		if problems := validation.IsDNS1123Subdomain(name); len(problems) != 0 {
+			return Config{}, fmt.Errorf("invalid WORKLOAD_RUNTIME_CLASS_NAME: %s", strings.Join(problems, "; "))
+		}
 	}
 
 	var err error
@@ -116,6 +135,19 @@ func Load() (Config, error) {
 	}
 
 	cfg.LogLevel = normalizeLogLevel(readEnv("LOG_LEVEL", defaultLogLevel))
+
+	if cfg.SecretSweepInterval, err = readDuration("WORKLOAD_SECRET_SWEEP_INTERVAL", 0); err != nil {
+		return Config{}, err
+	}
+	if cfg.SecretSweepGrace, err = readDuration("WORKLOAD_SECRET_SWEEP_GRACE", defaultSecretSweepGrace); err != nil {
+		return Config{}, err
+	}
+	if cfg.SecretSweepInterval < 0 || cfg.SecretSweepInterval > 0 && cfg.SecretSweepInterval < minSecretSweepInterval {
+		return Config{}, fmt.Errorf("WORKLOAD_SECRET_SWEEP_INTERVAL must be 0 (disabled) or at least %s", minSecretSweepInterval)
+	}
+	if cfg.SecretSweepGrace < minSecretSweepGrace {
+		return Config{}, fmt.Errorf("WORKLOAD_SECRET_SWEEP_GRACE must be at least %s", minSecretSweepGrace)
+	}
 
 	capabilityConfig := strings.TrimSpace(os.Getenv("CAPABILITY_IMPLEMENTATIONS"))
 	if capabilityConfig != "" {

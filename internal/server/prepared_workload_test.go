@@ -24,6 +24,7 @@ import (
 	kubetesting "k8s.io/client-go/testing"
 
 	runnerv1 "github.com/agynio/k8s-runner/internal/.gen/agynio/api/runner/v1"
+	"github.com/agynio/k8s-runner/internal/config"
 )
 
 var preparedPodResource = schema.GroupVersionResource{Version: "v1", Resource: "pods"}
@@ -112,6 +113,36 @@ func TestPreparedWorkloadStartsGated(t *testing.T) {
 	}
 	if len(pvc.Finalizers) != 0 {
 		t.Fatal("preparation must not claim execution before activation")
+	}
+}
+
+func TestPreparedWorkloadOperatorRuntime(t *testing.T) {
+	for _, conflict := range []bool{false, true} {
+		t.Run(map[bool]string{false: "configured runtime", true: "conflict before mutation"}[conflict], func(t *testing.T) {
+			client := preparedTestClient()
+			srv := New(Options{Clientset: client, Namespace: "default", StorageSize: "1Mi", Logger: zap.NewNop(),
+				WorkloadRuntimeClassName:  "isolated-tasks",
+				CapabilityImplementations: config.CapabilityImplementations{Docker: config.DockerImplementationKataQemu}})
+			req := preparedTestRequest()
+			if conflict {
+				req.Workload.Capabilities = []string{"docker"}
+			}
+			response, err := srv.PrepareWorkload(context.Background(), req)
+			if conflict {
+				if status.Code(err) != codes.FailedPrecondition {
+					t.Fatalf("expected conflict, got %v", err)
+				}
+				assertNoVolumeMutation(t, client)
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			pod := preparedTestPod(t, client, response.Binding)
+			if pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != "isolated-tasks" || !hasPreparedGate(pod) {
+				t.Fatalf("prepared runtime or gate lost: %+v", pod.Spec)
+			}
+		})
 	}
 }
 
@@ -454,5 +485,53 @@ func TestPreparedVolumeSerializesActivationsAcrossPods(t *testing.T) {
 	}
 	if first.Binding.InstanceUid == second.Binding.InstanceUid || first.Binding.Volumes[0].InstanceUid != second.Binding.Volumes[0].InstanceUid || hasPreparedGate(preparedTestPod(t, client, second.Binding)) {
 		t.Fatal("resume lost its own identity or workspace")
+	}
+}
+
+func TestPreparedActivationRechecksRuntimeAfterRestart(t *testing.T) {
+	for _, previous := range []string{"", "old-runtime", "required-runtime"} {
+		for _, alreadyActive := range []bool{false, true} {
+			t.Run(previous+map[bool]string{false: "/prepared", true: "/active"}[alreadyActive], func(t *testing.T) {
+				client := preparedTestClient()
+				before := preparedTestServer(client)
+				before.workloadRuntimeClassName = previous
+				binding := prepareAnchoredTest(t, before, anchoredTestRequest(t, before, false, false))
+				if alreadyActive {
+					if _, err := before.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: binding}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				after := preparedTestServer(client)
+				after.workloadRuntimeClassName = "required-runtime"
+				client.ClearActions()
+				_, err := after.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: binding})
+				if previous == "required-runtime" {
+					if err != nil {
+						t.Fatal(err)
+					}
+				} else {
+					if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "prepared_workload_runtime_mismatch" {
+						t.Fatalf("runtime change accepted: %v", err)
+					}
+					for _, action := range client.Actions() {
+						if action.GetVerb() != "get" {
+							t.Fatalf("runtime rejection mutated %s %s", action.GetVerb(), action.GetResource().Resource)
+						}
+					}
+					if !alreadyActive && !hasPreparedGate(preparedTestPod(t, client, binding)) {
+						t.Fatal("rejected pod lost gate")
+					}
+				}
+				// Policy changes must never strand cleanup of an older incarnation.
+				request := &runnerv1.RemovePreparedWorkloadRequest{Expected: binding}
+				if _, err := after.RemovePreparedWorkload(context.Background(), request); err != nil {
+					t.Fatal(err)
+				}
+				result, err := after.RemovePreparedWorkload(context.Background(), request)
+				if err != nil || result.GetState() != runnerv1.PreparedWorkloadRemovalState_PREPARED_WORKLOAD_REMOVAL_STATE_ABSENT {
+					t.Fatalf("cleanup blocked: %v", err)
+				}
+			})
+		}
 	}
 }

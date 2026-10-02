@@ -5,3 +5,9 @@ charts/
 tmp/
 internal/.gen/
 *.md
+.gen/
+.ci-api/
+.e2e-tooling/
+.e2e-deps/
+e2e/
+api/

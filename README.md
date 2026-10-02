@@ -240,6 +240,60 @@ and post-success Stop/Remove cleanup are separate lifecycle work. This change
 does not add a garbage collector, delete durable workspaces, change the Runner
 API, or establish end-to-end A2A recovery under first-provision rejection.
 
+## Workload Secret Release
+
+Until now only Stop/Remove deleted a started workload's pull and inline-file
+Secrets, by name from the Pod annotation, logging failures only. A Pod removed
+otherwise (by an operator or Pod garbage collection, or by a Stop whose Secret
+deletion then failed, which a retry sees as NotFound) left them behind. A
+leftover name also made a restart of that workload ID fail with `AlreadyExists`.
+
+A legacy (ungated) Pod needs its credentials before it is admitted, so they
+cannot carry its UID in their CREATE as prepared Secrets do. After the Pod
+CREATE returns, each Secret gets a Pod owner reference by a JSON patch that
+tests the UID and resource version this attempt created. A delayed or retried
+patch therefore fails rather than claiming a replacement. The owner is the
+returned Pod UID; if that Pod is already gone, garbage collection removes a
+Secret nothing can use. From then on, deleting the Pod by any actor releases its
+Secrets. A failed patch is logged with the workload ID and Secret names and does
+not fail a start whose Pod exists. Stop/Remove still delete by name, now with
+a five-second context that survives caller cancellation, logging each failure.
+
+An ownerless Secret remains possible after a crash or failure between the two
+writes, after an uncertain Pod CREATE, or from an earlier runner. The opt-in
+orphan sweep (`workloadSecretSweep.enabled`, default off) releases one only if
+all of the following hold:
+
+- It is in the workload namespace with `app.kubernetes.io/managed-by=k8s-runner`,
+  a UUID `agyn.io/workload-id`, the exact `workload-<id>-pull[-N]` or
+  `workload-<id>-inline-files` name and an `agyn.io/startup-attempt` annotation.
+- It has no owner references, finalizers, deletion timestamp, or prepared or
+  anchor annotation. Owned Secrets are left to garbage collection.
+- It is older than the grace period, no start for that ID is running in this
+  process, and a direct GET of `workload-<id>` returns NotFound.
+
+Deletion uses the listed UID and resource version as preconditions, so a
+Secret changed after the listing is kept. Each deletion is logged with the
+workload ID and Secret name only. A pass lists metadata, never Secret data, and
+is bounded to 50 pages, 100 deletions and two minutes. It runs at startup and
+every `interval` (default 5m, minimum 5s). `grace` (default 10m, minimum 1m) must
+outlast a start's gap between credential and Pod writes, including clock skew.
+Secrets from runners older than the startup-attempt annotation are never swept.
+
+Enabling the sweep adds a separate list-only Secret rule to the workload grant
+and sets `WORKLOAD_SECRET_SWEEP_INTERVAL` and `WORKLOAD_SECRET_SWEEP_GRACE`.
+RBAC cannot express a metadata-only list, so this grants Secret list in the
+workload namespace; the default chart still grants none. Owner patches need the
+existing Secret `patch` verb. External RBAC must supply the same rules.
+
+The E2E grants the source chart's workload rules in the disposable VM with a
+15s interval and 1m grace. It plants an ownerless orphan and near-misses,
+requires the orphan's logged release and the near-misses' survival, requires
+every runner Secret of a live Pod to be owned by exactly that Pod, and deletes
+one such Pod outside the runner to observe garbage collection release its
+Secrets. Unit tests cover the patch preconditions, cancellation, every retention
+rule, in-flight starts, changed Secrets, bounds and idempotence.
+
 ## Persistent claim reuse
 
 Custom callers must set a stable, owner-specific `labels.volume_key` before

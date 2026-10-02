@@ -71,19 +71,23 @@ func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 		return fmt.Errorf("init kube client: %w", err)
 	}
 
-	tcpServer, controlServer := newRunnerRPCServers(cfg.ZitiEnabled,
-		server.New(server.Options{
-			Clientset:                    kubeClient.Clientset,
-			RestConfig:                   kubeClient.RestConfig,
-			Namespace:                    cfg.Namespace,
-			StorageClass:                 cfg.StorageClass,
-			StorageSize:                  cfg.StorageSize,
-			Catalog:                      cfg.Catalog,
-			Logger:                       logger,
-			CapabilityImplementations:    cfg.CapabilityImplementations,
-			SupportingContainerResources: cfg.SupportingContainerResources,
-		}),
-	)
+	if cfg.SecretSweepInterval > 0 && kubeClient.Metadata == nil {
+		return fmt.Errorf("workload secret sweep requires a metadata client")
+	}
+	runner := server.New(server.Options{
+		Clientset:                    kubeClient.Clientset,
+		Metadata:                     kubeClient.Metadata,
+		RestConfig:                   kubeClient.RestConfig,
+		Namespace:                    cfg.Namespace,
+		StorageClass:                 cfg.StorageClass,
+		StorageSize:                  cfg.StorageSize,
+		Catalog:                      cfg.Catalog,
+		Logger:                       logger,
+		CapabilityImplementations:    cfg.CapabilityImplementations,
+		SupportingContainerResources: cfg.SupportingContainerResources,
+		WorkloadRuntimeClassName:     cfg.WorkloadRuntimeClassName,
+	})
+	tcpServer, controlServer := newRunnerRPCServers(cfg.ZitiEnabled, runner)
 	defer tcpServer.Stop()
 	if controlServer != tcpServer {
 		defer controlServer.Stop()
@@ -91,6 +95,17 @@ func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
+
+	// Independent of the control transport: ownerless credentials can be left
+	// by a crash whichever way the runner was reached.
+	if cfg.SecretSweepInterval > 0 {
+		logger.Info("workload secret sweep enabled", zap.Duration("interval", cfg.SecretSweepInterval), zap.Duration("grace", cfg.SecretSweepGrace))
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			runner.RunSecretSweep(ctx, cfg.SecretSweepInterval, cfg.SecretSweepGrace)
+		}()
+	}
 
 	startServe := func(grpcServer *grpc.Server, listener net.Listener, label string) {
 		wg.Add(1)

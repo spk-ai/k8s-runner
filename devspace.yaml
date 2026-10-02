@@ -1,7 +1,7 @@
 version: v2beta1
 
 vars:
-  K8S_RUNNER_NAMESPACE: platform
+  K8S_RUNNER_NAMESPACE: agyn-platform
 
 functions:
   patch_deployment: |-
@@ -130,6 +130,9 @@ pipelines:
       fi
       patch_deployment
       kubectl patch deployment k8s-runner -n ${K8S_RUNNER_NAMESPACE} --type merge -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+      # Short enough for the E2E to watch a planted orphan be released; the
+      # .github/e2e scripts read these back from the Deployment to bound waits.
+      kubectl set env deployment/k8s-runner -n ${K8S_RUNNER_NAMESPACE} WORKLOAD_SECRET_SWEEP_INTERVAL=15s WORKLOAD_SECRET_SWEEP_GRACE=1m
       kubectl scale deployment/k8s-runner -n ${K8S_RUNNER_NAMESPACE} --replicas=1
       kubectl rollout status deployment/k8s-runner -n ${K8S_RUNNER_NAMESPACE} --timeout=240s
       start_dev --disable-pod-replace k8s-runner-deploy
