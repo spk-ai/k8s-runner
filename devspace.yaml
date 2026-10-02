@@ -62,10 +62,13 @@ functions:
       -n ${K8S_RUNNER_NAMESPACE} --timeout=120s
 
     echo "Waiting for k8s-runner source sync and process start..."
+    # The whole log, drained: while the router's data model lags a new
+    # identity, bind retries bury the ready line under any tail, and an early
+    # grep exit would SIGPIPE kubectl.
     ELAPSED=0
     LABEL_SELECTOR="app.kubernetes.io/name=k8s-runner"
-    until kubectl logs -n ${K8S_RUNNER_NAMESPACE} -l "${LABEL_SELECTOR}" --tail=200 2>/dev/null | \
-      grep -q "gRPC server starting"; do
+    until kubectl logs -n ${K8S_RUNNER_NAMESPACE} -l "${LABEL_SELECTOR}" --tail=-1 2>/dev/null | \
+      awk '/gRPC server starting/ { found = 1 } END { exit !found }'; do
       sleep 5
       ELAPSED=$((ELAPSED + 5))
       if [ "$ELAPSED" -ge 600 ]; then
@@ -130,6 +133,12 @@ pipelines:
       fi
       patch_deployment
       kubectl patch deployment k8s-runner -n ${K8S_RUNNER_NAMESPACE} --type merge -p '{"spec":{"strategy":{"type":"Recreate","rollingUpdate":null}}}'
+      # The VM's stock orchestrator still assembles the NET_ADMIN tproxy
+      # sidecar, so this suite runs the legacy Pod profile with exactly that
+      # capability allowlisted. The restricted default is proven by the Pod
+      # Security fixtures and agents-orchestrator's explicit-proxy E2E leg,
+      # whose later environment update overrides these two values.
+      kubectl set env deployment/k8s-runner -n ${K8S_RUNNER_NAMESPACE} WORKLOAD_POD_SECURITY=none WORKLOAD_ALLOWED_CAPABILITIES=NET_ADMIN
       # Short enough for the E2E to watch a planted orphan be released; the
       # .github/e2e scripts read these back from the Deployment to bound waits.
       kubectl set env deployment/k8s-runner -n ${K8S_RUNNER_NAMESPACE} WORKLOAD_SECRET_SWEEP_INTERVAL=15s WORKLOAD_SECRET_SWEEP_GRACE=1m
