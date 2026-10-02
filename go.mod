@@ -3,6 +3,7 @@ module github.com/agynio/k8s-runner
 go 1.25.0
 
 require (
+	github.com/evanphx/json-patch v4.12.0+incompatible
 	github.com/google/uuid v1.6.0
 	github.com/openziti/sdk-golang v1.6.0
 	go.uber.org/zap v1.27.1
@@ -17,12 +18,12 @@ require (
 )
 
 require (
+	github.com/Jeffail/gabs v1.4.0 // indirect
 	github.com/cenkalti/backoff/v4 v4.3.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/emicklei/go-restful/v3 v3.11.0 // indirect
 	github.com/emirpasic/gods v1.18.1 // indirect
-	github.com/evanphx/json-patch v4.12.0+incompatible // indirect
 	github.com/fsnotify/fsnotify v1.9.0 // indirect
 	github.com/fullsailor/pkcs7 v0.0.0-20190404230743-d7302db945fa // indirect
 	github.com/go-jose/go-jose/v4 v4.0.5 // indirect
