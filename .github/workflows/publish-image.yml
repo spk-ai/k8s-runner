@@ -103,8 +103,12 @@ jobs:
             digest="$(jq -er .digest <<<"$manifest")"
             echo "::notice title=Commit image exists::$IMAGE_REF is $digest; reporting it without a rebuild."
             echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          elif grep -qF "$IMAGE_REF: not found" "$RUNNER_TEMP/inspect.err"; then
+            echo "No $IMAGE_REF yet."
           else
-            echo "No $IMAGE_REF yet: $(head -n 1 "$RUNNER_TEMP/inspect.err")"
+            # Any other failure could hide an existing tag that a push would move.
+            echo "::error::Cannot tell whether $IMAGE_REF exists: $(head -n 1 "$RUNNER_TEMP/inspect.err")"
+            exit 1
           fi
 
       # The runtime stage runs addgroup/adduser for each target platform.
