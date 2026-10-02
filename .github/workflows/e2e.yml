@@ -63,26 +63,7 @@ jobs:
 
       - name: Verify runner-owned resources were cleaned up
         if: always() && steps.deploy.outcome == 'success'
-        run: |
-          set -euo pipefail
-          selector=app.kubernetes.io/managed-by=k8s-runner
-          for _ in $(seq 1 24); do
-            left="$(kubectl get pods,pvc,secrets,configmaps -n agyn-workloads -l "${selector}" -o name)"
-            orphans="$(kubectl get pv -o json | python3 -c 'import json,sys; print("\n".join(p["metadata"]["name"] for p in json.load(sys.stdin)["items"] if (p["spec"].get("claimRef") or {}).get("namespace") == "agyn-workloads" and p["status"].get("phase") != "Bound"))')"
-            if [ -z "${left}" ]; then
-              echo "No runner-owned workload resources remain."
-              if [ -n "${orphans}" ]; then
-                echo "::warning::unbound workload volumes remain (check reclaim policy): ${orphans//$'\n'/ }"
-              fi
-              exit 0
-            fi
-            sleep 5
-          done
-          echo "::error::runner-owned resources remain after the suite"
-          printf '%s\n' "${left}"
-          kubectl get pods,pvc -n agyn-workloads -o wide || true
-          kubectl get pv -o wide || true
-          exit 1
+        run: python3 .github/e2e/verify-cleanup.py
 
       # The disposable VM is Helm-owned; there is no ArgoCD sync to restore.
       - name: Collect source deployment diagnostics
