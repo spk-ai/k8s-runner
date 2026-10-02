@@ -1,0 +1,36 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "denied-legacy-tproxy",
+    "namespace": "agyn-workloads",
+    "creationTimestamp": null
+  },
+  "spec": {
+    "initContainers": [
+      {
+        "name": "ziti-sidecar",
+        "image": "tunnel",
+        "resources": {},
+        "restartPolicy": "Always",
+        "securityContext": {
+          "capabilities": {
+            "add": [
+              "NET_ADMIN"
+            ]
+          }
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "main",
+        "image": "busybox",
+        "resources": {}
+      }
+    ],
+    "restartPolicy": "Never",
+    "automountServiceAccountToken": false
+  },
+  "status": {}
+}

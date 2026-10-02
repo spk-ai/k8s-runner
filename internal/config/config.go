@@ -48,6 +48,17 @@ type Config struct {
 	// Catalog is what this runner reports it offers. Declared in the runner's
 	// own configuration, since every entry needs an implementation here.
 	Catalog Catalog
+	// PodSecurity is the server-owned workload Pod profile; see pod_security.go.
+	PodSecurity PodSecurity
+}
+
+// DockerAvailable reports whether the docker capability can be served. Every
+// docker implementation needs privilege, unconfined profiles or a hostPath, so
+// the restricted profile never offers it. A configured implementation is then
+// ignored rather than fatal: the umbrella chart sets one by default, and a
+// runner that crash-looped on it would take every workload down with it.
+func (c Config) DockerAvailable() bool {
+	return c.CapabilityImplementations.Docker != "" && !c.PodSecurity.Restricted()
 }
 
 // CapabilityDocker is the capability name a workload asks for and the runner
@@ -147,6 +158,10 @@ func Load() (Config, error) {
 	}
 	if cfg.SecretSweepGrace < minSecretSweepGrace {
 		return Config{}, fmt.Errorf("WORKLOAD_SECRET_SWEEP_GRACE must be at least %s", minSecretSweepGrace)
+	}
+
+	if cfg.PodSecurity, err = loadPodSecurity(); err != nil {
+		return Config{}, err
 	}
 
 	capabilityConfig := strings.TrimSpace(os.Getenv("CAPABILITY_IMPLEMENTATIONS"))

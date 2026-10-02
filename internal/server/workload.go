@@ -69,6 +69,9 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	if err != nil {
 		return nil, err
 	}
+	if err := s.validateRequestedSecurity(req, capabilityPlan); err != nil {
+		return nil, err
+	}
 	// Runtime placement is operator policy, not caller metadata. Resolve it
 	// before creating credentials or volumes so conflicts have no side effects.
 	if name := s.workloadRuntimeClassName; name != "" {
@@ -176,6 +179,8 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	if len(imagePullSecrets) > 0 {
 		pod.Spec.ImagePullSecrets = imagePullSecrets
 	}
+
+	s.applyPodSecurity(pod)
 
 	if req.DnsConfig != nil && len(req.DnsConfig.Nameservers) > 0 {
 		pod.Spec.DNSPolicy = corev1.DNSNone
@@ -990,14 +995,16 @@ func buildContainer(spec *runnerv1.ContainerSpec, fallbackName string, volumeLoo
 		container.Command = []string{entrypoint}
 	}
 
+	// Requested capabilities were already checked against the operator
+	// allowlist (validateRequestedSecurity); the profile adds the rest of the
+	// security context once every container exists.
 	if len(spec.RequiredCapabilities) > 0 {
 		caps := make([]corev1.Capability, 0, len(spec.RequiredCapabilities))
 		for _, capability := range spec.RequiredCapabilities {
-			capName := strings.TrimSpace(capability)
-			if capName == "" {
+			if strings.TrimSpace(capability) == "" {
 				continue
 			}
-			caps = append(caps, corev1.Capability(capName))
+			caps = append(caps, corev1.Capability(config.NormalizeCapability(capability)))
 		}
 		if len(caps) > 0 {
 			container.SecurityContext = &corev1.SecurityContext{
@@ -1006,6 +1013,13 @@ func buildContainer(spec *runnerv1.ContainerSpec, fallbackName string, volumeLoo
 				},
 			}
 		}
+	}
+	// Tighten-only: "false" (or no property) leaves the image's writable root.
+	if spec.AdditionalProperties[readOnlyRootFilesystemKey] == readOnlyRootFilesystemValue {
+		if container.SecurityContext == nil {
+			container.SecurityContext = &corev1.SecurityContext{}
+		}
+		container.SecurityContext.ReadOnlyRootFilesystem = ptr.To(true)
 	}
 
 	if policy, ok := spec.AdditionalProperties["restart_policy"]; ok && policy == "Always" {

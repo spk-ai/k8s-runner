@@ -41,6 +41,7 @@ type Server struct {
 	logger                       *zap.Logger
 	capabilityImplementations    config.CapabilityImplementations
 	supportingContainerResources *config.ComputeResources
+	podSecurity                  config.PodSecurity
 
 	execSessions   map[string]*execSession
 	execSessionsMu sync.Mutex
@@ -64,6 +65,9 @@ type Options struct {
 	// Metadata lists workload Secrets without reading their content. Only the
 	// orphan sweep uses it.
 	Metadata metadata.Interface
+	// PodSecurity is the workload Pod profile and capability allowlist. The
+	// zero value keeps the upstream Pod shape with an empty allowlist.
+	PodSecurity config.PodSecurity
 }
 
 // New constructs a RunnerService server.
@@ -80,6 +84,7 @@ func New(options Options) *Server {
 		logger:                       options.Logger,
 		capabilityImplementations:    options.CapabilityImplementations,
 		supportingContainerResources: options.SupportingContainerResources,
+		podSecurity:                  options.PodSecurity,
 		execSessions:                 make(map[string]*execSession),
 		startsInFlight:               make(map[string]int),
 	}

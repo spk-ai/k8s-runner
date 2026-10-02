@@ -44,3 +44,17 @@ func TestCatalogCapabilitiesMergesTheCatalogEntry(t *testing.T) {
 		t.Fatalf("expected [docker gpu], got %v", got)
 	}
 }
+
+// The restricted workload profile refuses every docker implementation, so a
+// runner under it must not attract docker workloads it would then reject --
+// whether docker comes from the implementation map or the catalog.
+func TestCatalogCapabilitiesHidesDockerUnderRestrictedProfile(t *testing.T) {
+	cfg := config.Config{
+		CapabilityImplementations: config.CapabilityImplementations{Docker: config.DockerImplementationRootless},
+		Catalog:                   config.Catalog{Capabilities: []string{"docker", "gpu"}},
+		PodSecurity:               config.PodSecurity{Profile: config.PodSecurityRestricted},
+	}
+	if got := catalogCapabilities(cfg); !reflect.DeepEqual(got, []string{"gpu"}) {
+		t.Fatalf("expected [gpu], got %v", got)
+	}
+}

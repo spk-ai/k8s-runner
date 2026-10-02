@@ -160,6 +160,9 @@ func setBaseEnv(t *testing.T) {
 	t.Setenv("SUPPORTING_CONTAINER_RESOURCES", "")
 	unsetEnv(t, "WORKLOAD_SECRET_SWEEP_INTERVAL")
 	unsetEnv(t, "WORKLOAD_SECRET_SWEEP_GRACE")
+	for _, key := range []string{"WORKLOAD_POD_SECURITY", "WORKLOAD_RUN_AS_USER", "WORKLOAD_RUN_AS_GROUP", "WORKLOAD_FS_GROUP", "WORKLOAD_ALLOWED_CAPABILITIES", "CAPABILITY_IMPLEMENTATIONS"} {
+		unsetEnv(t, key)
+	}
 }
 
 func TestLoadSecretSweep(t *testing.T) {

@@ -1,0 +1,232 @@
+{
+  "kind": "Pod",
+  "apiVersion": "v1",
+  "metadata": {
+    "name": "allowed-explicit-proxy-task",
+    "namespace": "agyn-workloads",
+    "creationTimestamp": null,
+    "annotations": {
+      "agyn.dev/pod-security-profile": "restricted-v1"
+    }
+  },
+  "spec": {
+    "volumes": [
+      {
+        "name": "agyn-bin",
+        "emptyDir": {}
+      },
+      {
+        "name": "ziti-identity",
+        "emptyDir": {}
+      },
+      {
+        "name": "vol-workspace",
+        "persistentVolumeClaim": {
+          "claimName": "fixture-claim"
+        }
+      },
+      {
+        "name": "inline-files",
+        "secret": {
+          "secretName": "workload-00000000-0000-4000-8000-000000000001-inline-files"
+        }
+      }
+    ],
+    "initContainers": [
+      {
+        "name": "ziti-enroll",
+        "image": "proxy.invalid/workload-proxy",
+        "command": [
+          "/app/workload-proxy"
+        ],
+        "args": [
+          "enroll"
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "ziti-identity",
+            "mountPath": "/netfoundry"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "ziti-sidecar",
+        "image": "proxy.invalid/workload-proxy",
+        "command": [
+          "/app/workload-proxy"
+        ],
+        "args": [
+          "serve"
+        ],
+        "resources": {},
+        "restartPolicy": "Always",
+        "volumeMounts": [
+          {
+            "name": "ziti-identity",
+            "mountPath": "/netfoundry"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "agynd-cli-init",
+        "image": "init.invalid/agynd",
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "agyn-bin",
+            "mountPath": "/agyn"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "agent-runtime",
+        "image": "init.invalid/runtime",
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "agyn-bin",
+            "mountPath": "/agyn"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "ziti-wait",
+        "image": "proxy.invalid/workload-proxy",
+        "command": [
+          "/app/workload-proxy"
+        ],
+        "args": [
+          "wait"
+        ],
+        "resources": {},
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "readOnlyRootFilesystem": true,
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "containers": [
+      {
+        "name": "agent-main",
+        "image": "workspace.invalid/agent",
+        "args": [
+          "/agyn/bin/agynd"
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "vol-workspace",
+            "mountPath": "/workspace"
+          },
+          {
+            "name": "agyn-bin",
+            "mountPath": "/agyn"
+          },
+          {
+            "name": "inline-files",
+            "readOnly": true,
+            "mountPath": "/etc/ssl/certs/ca-certificates.crt",
+            "subPath": "inline-file-0"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "allowPrivilegeEscalation": false
+        }
+      },
+      {
+        "name": "mcp-00000001",
+        "image": "mcp.invalid/server",
+        "args": [
+          "/bin/sh",
+          "-c",
+          "serve"
+        ],
+        "resources": {},
+        "volumeMounts": [
+          {
+            "name": "inline-files",
+            "readOnly": true,
+            "mountPath": "/etc/ssl/certs/ca-certificates.crt",
+            "subPath": "inline-file-0"
+          }
+        ],
+        "securityContext": {
+          "capabilities": {
+            "drop": [
+              "ALL"
+            ]
+          },
+          "runAsNonRoot": true,
+          "allowPrivilegeEscalation": false
+        }
+      }
+    ],
+    "restartPolicy": "Never",
+    "automountServiceAccountToken": false,
+    "securityContext": {
+      "runAsUser": 10001,
+      "runAsGroup": 10001,
+      "runAsNonRoot": true,
+      "fsGroup": 10001,
+      "fsGroupChangePolicy": "OnRootMismatch",
+      "seccompProfile": {
+        "type": "RuntimeDefault"
+      }
+    },
+    "enableServiceLinks": false
+  },
+  "status": {}
+}
