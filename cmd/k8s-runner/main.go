@@ -86,7 +86,14 @@ func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 		CapabilityImplementations:    cfg.CapabilityImplementations,
 		SupportingContainerResources: cfg.SupportingContainerResources,
 		WorkloadRuntimeClassName:     cfg.WorkloadRuntimeClassName,
+		PodSecurity:                  cfg.PodSecurity,
 	})
+	logger.Info("workload pod security", zap.String("profile", string(cfg.PodSecurity.Profile)),
+		zap.Int64("run_as_user", cfg.PodSecurity.RunAsUser), zap.Strings("allowed_capabilities", cfg.PodSecurity.AllowedCapabilities))
+	if cfg.CapabilityImplementations.Docker != "" && !cfg.DockerAvailable() {
+		logger.Warn("docker capability implementation ignored: the restricted workload profile refuses it",
+			zap.String("implementation", string(cfg.CapabilityImplementations.Docker)))
+	}
 	tcpServer, controlServer := newRunnerRPCServers(cfg.ZitiEnabled, runner)
 	defer tcpServer.Stop()
 	if controlServer != tcpServer {
@@ -356,6 +363,11 @@ func catalogCapabilities(cfg config.Config) []string {
 		if capability == config.CapabilityComputeResources && !computeConfigured {
 			return
 		}
+		// The restricted Pod profile refuses every docker implementation, so
+		// advertising one would only place workloads that are then rejected.
+		if capability == config.CapabilityDocker && cfg.PodSecurity.Restricted() {
+			return
+		}
 		if _, ok := seen[capability]; ok {
 			return
 		}
@@ -365,7 +377,7 @@ func catalogCapabilities(cfg config.Config) []string {
 	for _, capability := range cfg.Catalog.Capabilities {
 		add(strings.TrimSpace(capability))
 	}
-	if cfg.CapabilityImplementations.Docker != "" {
+	if cfg.DockerAvailable() {
 		add(config.CapabilityDocker)
 	}
 	if computeConfigured {

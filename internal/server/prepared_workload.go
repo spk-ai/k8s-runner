@@ -382,6 +382,11 @@ func (s *Server) ActivateWorkload(ctx context.Context, req *runnerv1.ActivateWor
 		(pod.Spec.RuntimeClassName == nil || *pod.Spec.RuntimeClassName != required) {
 		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_runtime_mismatch")
 	}
+	// The same for the Pod security profile: a Pod prepared by a runner with
+	// a looser profile is never admitted to run under a stricter one.
+	if !s.podMatchesSecurity(pod) {
+		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_security_mismatch")
+	}
 	active := pod.Annotations[preparedStateAnnotation] == "active"
 	if pod.DeletionTimestamp != nil || active && hasPreparedGate(pod) || !active && (pod.Annotations[preparedStateAnnotation] != "prepared" || !hasPreparedGate(pod) || pod.Spec.NodeName != "") {
 		return nil, status.Error(codes.FailedPrecondition, "prepared_workload_not_activatable")

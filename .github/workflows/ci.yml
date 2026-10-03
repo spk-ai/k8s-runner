@@ -45,6 +45,12 @@ jobs:
       - name: Run tests
         run: go test ./...
 
+      # The Pod shapes the runner builds, evaluated by the pinned Kubernetes
+      # v1.35 restricted Pod Security evaluator in its own module.
+      - name: Evaluate workload Pod Security fixtures (restricted v1.35)
+        working-directory: hack/podcheck
+        run: go test ./...
+
       - name: Build
         run: go build ./...
 

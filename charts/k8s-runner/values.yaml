@@ -160,6 +160,20 @@ extraEnvVars: []
 # Set WORKLOAD_RUNTIME_CLASS_NAME in extraEnvVars to require an operator-chosen
 # RuntimeClass for all workloads. Conflicting capability runtimes are rejected
 # before resource creation. Empty retains the existing runtime selection.
+#
+# Workload Pod security is server-owned (internal/server/pod_security.go):
+# - WORKLOAD_POD_SECURITY: "restricted" (default) builds Pods the Kubernetes
+#   restricted Pod Security Standard admits: runAsNonRoot, seccomp
+#   RuntimeDefault, no privilege escalation, every capability dropped, service
+#   links off. The docker capability is refused and not advertised. "none" keeps
+#   the upstream Pod shape for installations still on the NET_ADMIN tproxy
+#   sidecar.
+# - WORKLOAD_RUN_AS_USER / WORKLOAD_RUN_AS_GROUP / WORKLOAD_FS_GROUP: the
+#   non-root workload identity, default 10001; 0 is refused.
+# - WORKLOAD_ALLOWED_CAPABILITIES: comma-separated capabilities a ContainerSpec
+#   may request, enforced under every profile and empty by default. Restricted
+#   accepts only NET_BIND_SERVICE; the legacy tproxy sidecar needs
+#   WORKLOAD_POD_SECURITY=none and NET_ADMIN listed here.
 extraEnvVarsCM: ""
 extraEnvVarsSecret: ""
 

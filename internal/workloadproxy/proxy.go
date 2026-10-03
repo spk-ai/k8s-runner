@@ -5,6 +5,7 @@ package workloadproxy
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -18,19 +19,85 @@ type Dialer interface {
 	DialContext(context.Context, string, string) (net.Conn, error)
 }
 
+// Classifier answers whether the overlay intercepts a destination, so an
+// unknown one is refused before any dial and with a distinct reason. Refresh
+// asks the overlay for its current service list once; implementations must
+// bound how often that reaches the controller.
+type Classifier interface {
+	Intercepted(host string, port uint16) bool
+	Refresh()
+}
+
+// Options are the serve-time settings of a Proxy. The zero value classifies
+// nothing (every destination goes to the dialer, whose own refusal is the
+// answer), has no fixed forwards and the default tunnel cap.
+type Options struct {
+	Classifier Classifier
+	// Forwards maps a fixed loopback listen authority to its overlay target.
+	// A proxied request for that authority is sent to the target, so a client
+	// that ignores NO_PROXY still reaches the platform endpoint.
+	Forwards map[string]string
+	// MaxTunnels caps concurrent CONNECT tunnels and forwarded connections.
+	MaxTunnels int
+}
+
+// DefaultMaxTunnels bounds what a runaway workload can hold open at once.
+const DefaultMaxTunnels = 512
+
+// ProxyStatusName is this proxy's name in RFC 9209 Proxy-Status responses.
+const ProxyStatusName = "agyn-workload-proxy"
+
+const (
+	errDestinationNotFound    = "destination_not_found"
+	errDestinationUnavailable = "destination_unavailable"
+	errConnectionLimit        = "connection_limit_reached"
+)
+
+// proxyError is a refusal the client is told about with a Proxy-Status error
+// type, so a workload (and the readiness tripwire) can tell "the overlay has no
+// such destination" from "the destination did not answer".
+type proxyError struct {
+	kind   string
+	status int
+}
+
+func (e *proxyError) Error() string { return e.kind }
+
+var (
+	notFound    = &proxyError{kind: errDestinationNotFound, status: http.StatusBadGateway}
+	unavailable = &proxyError{kind: errDestinationUnavailable, status: http.StatusBadGateway}
+	overLimit   = &proxyError{kind: errConnectionLimit, status: http.StatusServiceUnavailable}
+)
+
 type Proxy struct {
-	dialer    Dialer
-	transport *http.Transport
-	mu        sync.Mutex
-	tunnels   map[net.Conn]struct{}
-	closed    bool
+	dialer     Dialer
+	classifier Classifier
+	forwards   map[string]string
+	slots      chan struct{}
+	transport  *http.Transport
+	mu         sync.Mutex
+	tunnels    map[net.Conn]struct{}
+	closed     bool
 }
 
 func New(dialer Dialer) *Proxy {
+	return NewWithOptions(dialer, Options{})
+}
+
+func NewWithOptions(dialer Dialer, options Options) *Proxy {
 	if dialer == nil {
 		panic("overlay dialer required")
 	}
-	return &Proxy{dialer: dialer, transport: &http.Transport{DialContext: dialer.DialContext, Proxy: nil, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 32}, tunnels: map[net.Conn]struct{}{}}
+	limit := options.MaxTunnels
+	if limit <= 0 {
+		limit = DefaultMaxTunnels
+	}
+	p := &Proxy{dialer: dialer, classifier: options.Classifier, forwards: map[string]string{}, slots: make(chan struct{}, limit), tunnels: map[net.Conn]struct{}{}}
+	for listen, target := range options.Forwards {
+		p.forwards[listen] = target
+	}
+	p.transport = &http.Transport{DialContext: p.dialAuthority, Proxy: nil, ResponseHeaderTimeout: 30 * time.Second, IdleConnTimeout: 30 * time.Second, MaxIdleConns: 32}
+	return p
 }
 
 func Destination(authority string) (string, error) {
@@ -53,6 +120,61 @@ func ListenLoopback(address string) (net.Listener, error) {
 		return nil, errors.New("literal loopback listener required")
 	}
 	return net.Listen("tcp", address)
+}
+
+// target maps a validated authority to the overlay address to dial, or
+// refuses it. A fixed forward's own listen address maps to its target; any
+// other loopback or unspecified address is refused outright, so the proxy is
+// never a way back into the pod. Everything else must be intercepted.
+func (p *Proxy) target(authority string) (string, *proxyError) {
+	destination, err := Destination(authority)
+	if err != nil {
+		return "", notFound
+	}
+	if forward, ok := p.forwards[destination]; ok {
+		return forward, nil
+	}
+	host, portText, _ := net.SplitHostPort(destination)
+	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
+		return "", notFound
+	}
+	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
+		return "", notFound
+	}
+	if p.classifier == nil {
+		return destination, nil
+	}
+	port, _ := strconv.ParseUint(portText, 10, 16)
+	if p.classifier.Intercepted(host, uint16(port)) {
+		return destination, nil
+	}
+	// A rule attached moments ago may not have reached this identity's
+	// service list yet; one bounded refresh rather than a stale refusal.
+	p.classifier.Refresh()
+	if p.classifier.Intercepted(host, uint16(port)) {
+		return destination, nil
+	}
+	return "", notFound
+}
+
+// dialAuthority is the HTTP transport's only dialer: it maps and classifies
+// like CONNECT does, so absolute-form requests cannot take a different path.
+func (p *Proxy) dialAuthority(ctx context.Context, network, address string) (net.Conn, error) {
+	target, refusal := p.target(address)
+	if refusal != nil {
+		return nil, refusal
+	}
+	conn, err := p.dialer.DialContext(ctx, network, target)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %v", unavailable, err)
+	}
+	return conn, nil
+}
+
+func refuse(w http.ResponseWriter, refusal *proxyError) {
+	w.Header().Set("Proxy-Status", ProxyStatusName+"; error="+refusal.kind)
+	w.Header().Set("Connection", "close")
+	http.Error(w, "overlay "+strings.ReplaceAll(refusal.kind, "_", " "), refusal.status)
 }
 
 func stripHopHeaders(header http.Header) {
@@ -83,13 +205,21 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
 	}
+	if _, refusal := p.target(authority); refusal != nil {
+		refuse(w, refusal)
+		return
+	}
 	request := r.Clone(r.Context())
 	request.RequestURI = ""
 	request.Header = r.Header.Clone()
 	stripHopHeaders(request.Header)
 	response, err := p.transport.RoundTrip(request)
 	if err != nil {
-		http.Error(w, "overlay destination unavailable", http.StatusBadGateway)
+		var refusal *proxyError
+		if !errors.As(err, &refusal) {
+			refusal = unavailable
+		}
+		refuse(w, refusal)
 		return
 	}
 	defer response.Body.Close()
@@ -104,21 +234,30 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
-	destination, err := Destination(r.Host)
-	if err != nil {
+	if _, err := Destination(r.Host); err != nil {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
 	}
+	target, refusal := p.target(r.Host)
+	if refusal != nil {
+		refuse(w, refusal)
+		return
+	}
+	if !p.acquire() {
+		refuse(w, overLimit)
+		return
+	}
+	defer p.release()
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		http.Error(w, "tunneling unavailable", http.StatusInternalServerError)
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	upstream, err := p.dialer.DialContext(ctx, "tcp", destination)
+	upstream, err := p.dialer.DialContext(ctx, "tcp", target)
 	cancel()
 	if err != nil {
-		http.Error(w, "overlay destination unavailable", http.StatusBadGateway)
+		refuse(w, unavailable)
 		return
 	}
 	downstream, buffered, err := hijacker.Hijack()
@@ -140,13 +279,46 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 	if err = buffered.Flush(); err != nil {
 		return
 	}
-	done := make(chan struct{})
-	go func() { _, _ = io.Copy(upstream, buffered); upstream.Close(); downstream.Close(); close(done) }()
-	_, _ = io.Copy(downstream, upstream)
-	downstream.Close()
-	upstream.Close()
-	<-done
+	splice(downstream, buffered, upstream)
 }
+
+// halfCloseGrace bounds how long one direction may stay open after the other
+// finished, so a peer that never closes cannot pin a tunnel slot forever.
+const halfCloseGrace = 30 * time.Second
+
+// splice copies both directions and propagates a finished direction as a
+// half-close where the connection supports it, so request/response protocols
+// that signal the end of a request with EOF keep working.
+func splice(client net.Conn, clientReader io.Reader, upstream net.Conn) {
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(upstream, clientReader); closeWrite(upstream); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(client, upstream); closeWrite(client); done <- struct{}{} }()
+	<-done
+	select {
+	case <-done:
+	case <-time.After(halfCloseGrace):
+	}
+	client.Close()
+	upstream.Close()
+}
+
+func closeWrite(conn net.Conn) {
+	if writer, ok := conn.(interface{ CloseWrite() error }); ok && writer.CloseWrite() == nil {
+		return
+	}
+	conn.Close()
+}
+
+func (p *Proxy) acquire() bool {
+	select {
+	case p.slots <- struct{}{}:
+		return true
+	default:
+		return false
+	}
+}
+
+func (p *Proxy) release() { <-p.slots }
 
 func (p *Proxy) track(connections ...net.Conn) bool {
 	p.mu.Lock()
@@ -204,7 +376,12 @@ func (p *Proxy) Forward(ctx context.Context, listener net.Listener, destination 
 		if err != nil {
 			return err
 		}
+		if !p.acquire() {
+			client.Close()
+			continue
+		}
 		go func() {
+			defer p.release()
 			dialCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			remote, err := p.dialer.DialContext(dialCtx, "tcp", target)
 			cancel()
@@ -218,12 +395,34 @@ func (p *Proxy) Forward(ctx context.Context, listener net.Listener, destination 
 				return
 			}
 			defer p.finish(client, remote)
-			done := make(chan struct{})
-			go func() { io.Copy(remote, client); remote.Close(); client.Close(); close(done) }()
-			io.Copy(client, remote)
-			client.Close()
-			remote.Close()
-			<-done
+			splice(client, client, remote)
 		}()
 	}
+}
+
+// ValidateForwards checks a serve configuration before anything listens: every
+// forward listens on a distinct literal loopback authority that is not the
+// proxy's own, and targets a valid overlay destination.
+func ValidateForwards(listen string, forwards map[string]string) error {
+	own, err := Destination(listen)
+	if err != nil {
+		return fmt.Errorf("invalid proxy listener")
+	}
+	for from, to := range forwards {
+		normalized, err := Destination(from)
+		if err != nil || normalized != from {
+			return fmt.Errorf("invalid forwarding listener %q", from)
+		}
+		host, _, _ := net.SplitHostPort(from)
+		if ip := net.ParseIP(host); ip == nil || !ip.IsLoopback() {
+			return fmt.Errorf("forwarding listener %q is not a literal loopback address", from)
+		}
+		if from == own {
+			return fmt.Errorf("forwarding listener %q collides with the proxy listener", from)
+		}
+		if _, err := Destination(to); err != nil {
+			return fmt.Errorf("invalid forwarding destination for %q", from)
+		}
+	}
+	return nil
 }

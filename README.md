@@ -329,6 +329,41 @@ trust-manager injects CA bundles, the operator also needs permission to read
 the controller metadata. Investigate unexpected injected objects or backed
 claims instead of bypassing the fixture's cleanup refusal.
 
+## Restricted workload Pods
+
+Workload Pods are built under the server-owned profile in
+[pod_security.go](internal/server/pod_security.go); operator settings are
+documented in [chart values](charts/k8s-runner/values.yaml). The fork default
+`WORKLOAD_POD_SECURITY=restricted` produces Pods the Kubernetes restricted Pod
+Security Standard admits, refuses (and stops advertising) the docker
+capability, and rejects any `RequiredCapabilities` entry outside
+`WORKLOAD_ALLOWED_CAPABILITIES` before a Secret, PVC or Pod is written. The
+allowlist is empty by default and is enforced under every profile, so an
+installation still running the NET_ADMIN tproxy sidecar must set
+`WORKLOAD_POD_SECURITY=none` and list `NET_ADMIN` explicitly. Activation of a
+prepared Pod built under a looser profile, or adding a capability the allowlist
+no longer lists, is refused; its cleanup is not.
+
+The [fixture tests](internal/server/pod_security_test.go) keep every built Pod
+shape in `internal/server/testdata/pod-security`, and
+[hack/podcheck](hack/podcheck/podcheck_test.go) evaluates them with the pinned
+Kubernetes v1.35 restricted evaluator in CI. This is admission evidence, not a
+runtime proof: Kata, CNI enforcement and image behaviour as a non-root user need
+their own live acceptance.
+
+### Workload proxy
+
+The image also ships `/app/workload-proxy`, the unprivileged overlay sidecar for
+agents-orchestrator's `WORKLOAD_NETWORK_MODE=explicit-proxy`. Its `enroll`,
+`serve` and `wait` contracts are documented in
+[main.go](cmd/workload-proxy/main.go) and
+[internal/workloadproxy](internal/workloadproxy/proxy.go). It listens only on
+literal loopback addresses, dials only through the enrolled identity's
+intercepts (no fallback dialer, checked at startup), refuses unknown
+destinations with `Proxy-Status: agyn-workload-proxy; error=destination_not_found`
+and never terminates TLS. It does not yet host exposures (`host.v1` binds), so
+`agyn expose` is not available to explicit-proxy workloads.
+
 ## Docker capability notes
 
 Review [capabilities.go](internal/server/capabilities.go) before enabling Docker.
