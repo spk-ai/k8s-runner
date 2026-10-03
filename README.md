@@ -361,7 +361,12 @@ agents-orchestrator's `WORKLOAD_NETWORK_MODE=explicit-proxy`. Its `enroll`,
 literal loopback addresses, dials only through the enrolled identity's
 intercepts (no fallback dialer, checked at startup), refuses unknown
 destinations with `Proxy-Status: agyn-workload-proxy; error=destination_not_found`
-and never terminates TLS. It does not yet host exposures (`host.v1` binds), so
+and never terminates TLS. `serve --direct-egress` is the operator opt-in for
+open internet access: a destination no intercept covers is resolved by the
+proxy and dialed directly, only to a public unicast address (private, cluster,
+link-local, CGNAT and documentation ranges and every `--direct-deny` prefix are
+refused as `destination_not_found`, so the readiness tripwires still hold).
+The Pod's NetworkPolicy must also allow that egress. It does not yet host exposures (`host.v1` binds), so
 `agyn expose` is not available to explicit-proxy workloads.
 
 ## Docker capability notes

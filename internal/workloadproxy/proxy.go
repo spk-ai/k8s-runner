@@ -1,5 +1,6 @@
-// Package workloadproxy adapts explicit HTTP clients to an overlay-only dialer.
-// It never resolves or dials a destination through the host network itself.
+// Package workloadproxy adapts explicit HTTP clients to an overlay dialer.
+// It resolves and dials through the host network only when DirectEgress is
+// configured, and then only to public addresses the overlay does not intercept.
 package workloadproxy
 
 import (
@@ -39,6 +40,9 @@ type Options struct {
 	Forwards map[string]string
 	// MaxTunnels caps concurrent CONNECT tunnels and forwarded connections.
 	MaxTunnels int
+	// Direct, when set, carries destinations the overlay does not intercept
+	// to public addresses instead of refusing them.
+	Direct *DirectEgress
 }
 
 // DefaultMaxTunnels bounds what a runaway workload can hold open at once.
@@ -71,6 +75,7 @@ var (
 
 type Proxy struct {
 	dialer     Dialer
+	direct     *DirectEgress
 	classifier Classifier
 	forwards   map[string]string
 	slots      chan struct{}
@@ -92,7 +97,7 @@ func NewWithOptions(dialer Dialer, options Options) *Proxy {
 	if limit <= 0 {
 		limit = DefaultMaxTunnels
 	}
-	p := &Proxy{dialer: dialer, classifier: options.Classifier, forwards: map[string]string{}, slots: make(chan struct{}, limit), tunnels: map[net.Conn]struct{}{}}
+	p := &Proxy{dialer: dialer, direct: options.Direct, classifier: options.Classifier, forwards: map[string]string{}, slots: make(chan struct{}, limit), tunnels: map[net.Conn]struct{}{}}
 	for listen, target := range options.Forwards {
 		p.forwards[listen] = target
 	}
@@ -122,49 +127,71 @@ func ListenLoopback(address string) (net.Listener, error) {
 	return net.Listen("tcp", address)
 }
 
-// target maps a validated authority to the overlay address to dial, or
-// refuses it. A fixed forward's own listen address maps to its target; any
-// other loopback or unspecified address is refused outright, so the proxy is
-// never a way back into the pod. Everything else must be intercepted.
-func (p *Proxy) target(authority string) (string, *proxyError) {
+// route is where a validated destination is dialed: an overlay address, or a
+// resolved public literal address on the direct path.
+type route struct {
+	address string
+	direct  bool
+}
+
+// target maps a validated authority to the address to dial, or refuses it. A
+// fixed forward's own listen address maps to its target; any other loopback
+// or unspecified address is refused outright, so the proxy is never a way back
+// into the pod. Everything else must be intercepted, or leave directly to a
+// public address when direct egress is enabled.
+func (p *Proxy) target(ctx context.Context, authority string) (route, *proxyError) {
 	destination, err := Destination(authority)
 	if err != nil {
-		return "", notFound
+		return route{}, notFound
 	}
 	if forward, ok := p.forwards[destination]; ok {
-		return forward, nil
+		return route{address: forward}, nil
 	}
 	host, portText, _ := net.SplitHostPort(destination)
 	if ip := net.ParseIP(host); ip != nil && (ip.IsLoopback() || ip.IsUnspecified()) {
-		return "", notFound
+		return route{}, notFound
 	}
 	if strings.EqualFold(host, "localhost") || strings.HasSuffix(strings.ToLower(host), ".localhost") {
-		return "", notFound
+		return route{}, notFound
 	}
 	if p.classifier == nil {
-		return destination, nil
+		return route{address: destination}, nil
 	}
 	port, _ := strconv.ParseUint(portText, 10, 16)
 	if p.classifier.Intercepted(host, uint16(port)) {
-		return destination, nil
+		return route{address: destination}, nil
 	}
 	// A rule attached moments ago may not have reached this identity's
 	// service list yet; one bounded refresh rather than a stale refusal.
 	p.classifier.Refresh()
 	if p.classifier.Intercepted(host, uint16(port)) {
-		return destination, nil
+		return route{address: destination}, nil
 	}
-	return "", notFound
+	if p.direct != nil {
+		address, refusal := p.direct.resolve(ctx, host, uint16(port))
+		if refusal != nil {
+			return route{}, refusal
+		}
+		return route{address: address, direct: true}, nil
+	}
+	return route{}, notFound
+}
+
+func (p *Proxy) dial(ctx context.Context, network string, target route) (net.Conn, error) {
+	if target.direct {
+		return p.direct.Dialer.DialContext(ctx, network, target.address)
+	}
+	return p.dialer.DialContext(ctx, network, target.address)
 }
 
 // dialAuthority is the HTTP transport's only dialer: it maps and classifies
 // like CONNECT does, so absolute-form requests cannot take a different path.
 func (p *Proxy) dialAuthority(ctx context.Context, network, address string) (net.Conn, error) {
-	target, refusal := p.target(address)
+	target, refusal := p.target(ctx, address)
 	if refusal != nil {
 		return nil, refusal
 	}
-	conn, err := p.dialer.DialContext(ctx, network, target)
+	conn, err := p.dial(ctx, network, target)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", unavailable, err)
 	}
@@ -205,7 +232,7 @@ func (p *Proxy) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
 	}
-	if _, refusal := p.target(authority); refusal != nil {
+	if _, refusal := p.target(r.Context(), authority); refusal != nil {
 		refuse(w, refusal)
 		return
 	}
@@ -238,7 +265,7 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid destination", http.StatusBadRequest)
 		return
 	}
-	target, refusal := p.target(r.Host)
+	target, refusal := p.target(r.Context(), r.Host)
 	if refusal != nil {
 		refuse(w, refusal)
 		return
@@ -254,7 +281,7 @@ func (p *Proxy) connect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
-	upstream, err := p.dialer.DialContext(ctx, "tcp", target)
+	upstream, err := p.dial(ctx, "tcp", target)
 	cancel()
 	if err != nil {
 		refuse(w, unavailable)
