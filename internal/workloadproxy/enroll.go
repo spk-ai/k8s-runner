@@ -2,6 +2,7 @@ package workloadproxy
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,7 +42,7 @@ func EnrollIdentity(ctx context.Context, path, token string, enrollFn EnrollFunc
 	}
 	identity, err := enrollFn(ctx, token)
 	if err != nil {
-		return errors.New(redact(err.Error(), token))
+		return errors.New(redact(err.Error(), enrollmentSecrets(token)))
 	}
 	if len(identity) == 0 {
 		return errors.New("enrollment produced no identity")
@@ -73,11 +74,37 @@ func EnrollIdentity(ctx context.Context, path, token string, enrollFn EnrollFunc
 	return nil
 }
 
-func redact(message, token string) string {
-	if token == "" {
-		return message
+// enrollmentSecrets are the strings an enrollment error must never carry: the
+// JWT and its jti. An ott jti is the one-time token itself (the controller
+// enrolls whoever POSTs it with a CSR), and the SDK sends it in the enrollment
+// URL's query, which a failed POST's *url.Error prints. The claims are read
+// without verification, only to know what to redact.
+func enrollmentSecrets(token string) []string {
+	secrets := []string{token}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return secrets
 	}
-	return strings.ReplaceAll(message, token, "[redacted]")
+	payload, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(parts[1], "="))
+	if err != nil {
+		return secrets
+	}
+	var claims struct {
+		ID string `json:"jti"`
+	}
+	if json.Unmarshal(payload, &claims) != nil || claims.ID == "" {
+		return secrets
+	}
+	return append(secrets, claims.ID, url.QueryEscape(claims.ID))
+}
+
+func redact(message string, secrets []string) string {
+	for _, secret := range secrets {
+		if secret != "" {
+			message = strings.ReplaceAll(message, secret, "[redacted]")
+		}
+	}
+	return message
 }
 
 // ZitiEnroll enrolls with the OpenZiti SDK. The token's signature is checked
