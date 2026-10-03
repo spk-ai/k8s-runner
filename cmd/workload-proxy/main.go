@@ -100,13 +100,25 @@ func serve(ctx context.Context, args []string) error {
 	identity := flags.String("identity", "", "existing enrolled workload identity file")
 	listen := flags.String("listen", "127.0.0.1:18080", "literal loopback HTTP proxy listener")
 	refresh := flags.Duration("service-refresh", 5*time.Second, "how often the identity's service list is refreshed")
-	var mappings repeated
+	var mappings, denies repeated
 	flags.Var(&mappings, "forward", "loopback-listen=original-overlay-host:port (repeatable)")
+	directEgress := flags.Bool("direct-egress", false, "dial destinations the overlay does not intercept directly, public addresses only")
+	flags.Var(&denies, "direct-deny", "extra address or CIDR direct egress must never reach, such as the node's public address (repeatable)")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if *identity == "" {
 		return errors.New("identity file is required")
+	}
+	var direct *workloadproxy.DirectEgress
+	if *directEgress {
+		deny, err := workloadproxy.ParseDeny(denies)
+		if err != nil {
+			return err
+		}
+		direct = workloadproxy.NewDirectEgress(deny)
+	} else if len(denies) > 0 {
+		return errors.New("--direct-deny requires --direct-egress")
 	}
 	forwards := map[string]string{}
 	for _, mapping := range mappings {
@@ -143,7 +155,8 @@ func serve(ctx context.Context, args []string) error {
 	}
 	contexts := ziti.NewSdkCollection()
 	contexts.Add(overlay)
-	// No fallback dialer: unmatched or unauthorized destinations fail closed.
+	// No overlay fallback dialer: the only path outside the overlay is the
+	// explicit, public-only direct egress below.
 	sdkDialer := contexts.NewDialer()
 	if err := workloadproxy.RequireNoFallback(sdkDialer); err != nil {
 		return err
@@ -155,6 +168,7 @@ func serve(ctx context.Context, args []string) error {
 	proxy := workloadproxy.NewWithOptions(dialer, workloadproxy.Options{
 		Classifier: &workloadproxy.ContextClassifier{Context: overlay},
 		Forwards:   forwards,
+		Direct:     direct,
 	})
 	defer proxy.Close()
 	ctx, stop := context.WithCancelCause(ctx)
@@ -184,7 +198,7 @@ func serve(ctx context.Context, args []string) error {
 		defer cancel()
 		server.Shutdown(shutdown)
 	}()
-	log.Printf("workload proxy listening on %s with %d fixed forwards", *listen, len(forwards))
+	log.Printf("workload proxy listening on %s with %d fixed forwards, direct egress %t", *listen, len(forwards), direct != nil)
 	if err = server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		return errors.New("proxy listener stopped")
 	}
