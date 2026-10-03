@@ -1,6 +1,7 @@
 package server
 
 import (
+	"slices"
 	"strings"
 
 	"google.golang.org/grpc/codes"
@@ -95,8 +96,19 @@ func restrictContainer(container *corev1.Container) {
 }
 
 // podMatchesSecurity is the activation recheck: a prepared Pod must have been
-// built under the profile now in force. It reads only the immutable Pod.
+// built under the profile now in force, and every capability its (immutable)
+// containers add must still be allowlisted. The allowlist applies under every
+// profile, as at start, so narrowing it also stops a Pod prepared before.
 func (s *Server) podMatchesSecurity(pod *corev1.Pod) bool {
+	for _, container := range append(slices.Clone(pod.Spec.InitContainers), pod.Spec.Containers...) {
+		if sc := container.SecurityContext; sc != nil && sc.Capabilities != nil {
+			for _, added := range sc.Capabilities.Add {
+				if !s.podSecurity.AllowsCapability(config.NormalizeCapability(string(added))) {
+					return false
+				}
+			}
+		}
+	}
 	if !s.podSecurity.Restricted() {
 		return true
 	}

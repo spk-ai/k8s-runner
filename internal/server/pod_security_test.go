@@ -251,6 +251,36 @@ func TestPreparedActivationRechecksPodSecurity(t *testing.T) {
 	}
 }
 
+// The allowlist is enforced under every profile, so activation rechecks it
+// too: a Pod prepared while NET_ADMIN was listed must not start once the
+// operator has removed it, exactly as a new start would be refused.
+func TestPreparedActivationRechecksTheCapabilityAllowlist(t *testing.T) {
+	client := preparedTestClient()
+	before := preparedTestServer(client)
+	before.podSecurity = config.PodSecurity{Profile: config.PodSecurityNone, AllowedCapabilities: []string{"NET_ADMIN"}}
+	req := preparedTestRequest()
+	req.Workload.InitContainers = []*runnerv1.ContainerSpec{{Name: "ziti-sidecar", Image: "tunnel", RequiredCapabilities: []string{"NET_ADMIN"},
+		AdditionalProperties: map[string]string{"restart_policy": "Always"}}}
+	response, err := before.PrepareWorkload(context.Background(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	after := preparedTestServer(client)
+	after.podSecurity = config.PodSecurity{Profile: config.PodSecurityNone}
+	client.ClearActions()
+	_, err = after.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: response.Binding})
+	if status.Code(err) != codes.FailedPrecondition || status.Convert(err).Message() != "prepared_workload_security_mismatch" {
+		t.Fatalf("Pod adding a no longer allowlisted capability activated: %v", err)
+	}
+	assertNoWrites(t, client)
+	if !hasPreparedGate(preparedTestPod(t, client, response.Binding)) {
+		t.Fatal("rejected pod lost its gate")
+	}
+	if _, err := before.ActivateWorkload(context.Background(), &runnerv1.ActivateWorkloadRequest{Expected: response.Binding}); err != nil {
+		t.Fatalf("unchanged allowlist refused its own preparation: %v", err)
+	}
+}
+
 func assertNoWrites(t *testing.T, client *fake.Clientset) {
 	t.Helper()
 	for _, action := range client.Actions() {

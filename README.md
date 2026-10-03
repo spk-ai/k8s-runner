@@ -341,7 +341,8 @@ capability, and rejects any `RequiredCapabilities` entry outside
 allowlist is empty by default and is enforced under every profile, so an
 installation still running the NET_ADMIN tproxy sidecar must set
 `WORKLOAD_POD_SECURITY=none` and list `NET_ADMIN` explicitly. Activation of a
-prepared Pod built under a looser profile is refused; its cleanup is not.
+prepared Pod built under a looser profile, or adding a capability the allowlist
+no longer lists, is refused; its cleanup is not.
 
 The [fixture tests](internal/server/pod_security_test.go) keep every built Pod
 shape in `internal/server/testdata/pod-security`, and
