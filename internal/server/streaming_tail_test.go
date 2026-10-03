@@ -38,12 +38,16 @@ func TestReadLogTailKeepsNewestBytes(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			reader := &chunkReader{data: []byte(test.input), chunk: test.chunk}
-			got, truncated, err := readLogTail(reader, test.maxBytes, test.readLimit)
+			got, truncated, exceeded, err := readLogTail(reader, test.maxBytes, test.readLimit)
 			if err != nil {
 				t.Fatalf("readLogTail: %v", err)
 			}
 			if string(got) != test.want || truncated != test.wantTruncated {
 				t.Fatalf("got %q truncated=%v, want %q truncated=%v", got, truncated, test.want, test.wantTruncated)
+			}
+			// Only a read stopped by its limit ends before the output does.
+			if exceeded != (test.name == "read_limit") {
+				t.Fatalf("exceeded=%v", exceeded)
 			}
 			if len(got) > test.maxBytes {
 				t.Fatalf("returned %d bytes, bound is %d", len(got), test.maxBytes)
@@ -53,11 +57,11 @@ func TestReadLogTailKeepsNewestBytes(t *testing.T) {
 }
 
 func TestReadLogTailRejectsBadBoundsAndErrors(t *testing.T) {
-	if _, _, err := readLogTail(strings.NewReader("x"), 0, 10); err == nil {
+	if _, _, _, err := readLogTail(strings.NewReader("x"), 0, 10); err == nil {
 		t.Fatal("expected error for zero bound")
 	}
 	boom := errors.New("boom")
-	if _, _, err := readLogTail(iotest.ErrReader(boom), 4, 10); !errors.Is(err, boom) {
+	if _, _, _, err := readLogTail(iotest.ErrReader(boom), 4, 10); !errors.Is(err, boom) {
 		t.Fatalf("expected read error, got %v", err)
 	}
 }
@@ -122,6 +126,25 @@ func TestTailWorkloadLogsAddressesTheWorkloadPod(t *testing.T) {
 	}
 	if response.MaxBytes != tailLogsMaxBytes {
 		t.Fatalf("ceiling not applied: %d", response.MaxBytes)
+	}
+}
+
+// Output larger than the read limit even at one line is refused rather than
+// returned as an earlier slice that looks like the newest output.
+func TestTailWorkloadLogsRefusesAnOversizedSlice(t *testing.T) {
+	limit := tailLogsReadLimit
+	tailLogsReadLimit = 4
+	t.Cleanup(func() { tailLogsReadLimit = limit })
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: podNameFromID("w1"), Namespace: "workloads"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+	}
+	s := New(Options{Clientset: fake.NewSimpleClientset(pod), Namespace: "workloads", Logger: zap.NewNop(), Catalog: testCatalog()})
+	// The fake answers every read with "fake logs", over the 4-byte limit at
+	// any line count, so every reduced retry also reaches the limit.
+	_, err := s.TailWorkloadLogs(context.Background(), &runnerv1.TailWorkloadLogsRequest{WorkloadId: "w1", ContainerName: "main", MaxBytes: 64})
+	if status.Code(err) != codes.ResourceExhausted || status.Convert(err).Message() != "log_line_exceeds_read_limit" {
+		t.Fatalf("got %v, want ResourceExhausted", err)
 	}
 }
 

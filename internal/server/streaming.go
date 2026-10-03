@@ -106,12 +106,15 @@ const (
 	// tailLogsDefaultLines and tailLogsMaxLines bound the kubelet's own tail.
 	tailLogsDefaultLines = 2000
 	tailLogsMaxLines     = 10000
-	// tailLogsReadLimit stops reading a backend tail whose lines are huge. The
-	// kubelet's rotated log file already bounds it; this keeps the call bounded
-	// even when that setting is raised.
-	tailLogsReadLimit = 16 * 1024 * 1024
-	tailLogsTimeout   = 30 * time.Second
+	tailLogsTimeout      = 30 * time.Second
 )
+
+// tailLogsReadLimit stops reading a backend tail whose lines are huge. The
+// kubelet's rotated log file already bounds it; this keeps the call bounded
+// even when that setting is raised. A read that reaches it is retried with a
+// tenth of the lines, so the bytes returned are still the newest. A variable
+// only so tests can reach it without 16 MiB of output.
+var tailLogsReadLimit = 16 * 1024 * 1024
 
 // TailWorkloadLogs reads a bounded, non-following snapshot of a container's
 // newest output. Only the newest max_bytes cross the wire, whatever the kubelet
@@ -153,23 +156,46 @@ func (s *Server) TailWorkloadLogs(ctx context.Context, req *runnerv1.TailWorkloa
 	if !podHasContainer(pod, containerName) {
 		return nil, status.Error(codes.NotFound, "container_not_found")
 	}
+	for reduced := false; ; reduced = true {
+		data, truncated, exceeded, err := s.readContainerLogTail(ctx, podName, containerName, lines, req.GetPrevious(), int(maxBytes))
+		if err != nil {
+			return nil, err
+		}
+		if !exceeded {
+			return &runnerv1.TailWorkloadLogsResponse{Data: data, Truncated: truncated || reduced, MaxBytes: maxBytes}, nil
+		}
+		// Bytes read up to the limit end before the output does: never
+		// present them as the newest output.
+		if lines == 1 {
+			return nil, status.Error(codes.ResourceExhausted, "log_line_exceeds_read_limit")
+		}
+		lines = max(lines/10, 1)
+	}
+}
+
+// readContainerLogTail reads one bounded tail. exceeded reports that the read
+// limit was reached before the end of the output.
+func (s *Server) readContainerLogTail(ctx context.Context, podName, containerName string, lines int64, previous bool, maxBytes int) ([]byte, bool, bool, error) {
 	logStream, err := s.clientset.CoreV1().Pods(s.namespace).GetLogs(podName, &corev1.PodLogOptions{
 		Container: containerName,
 		TailLines: &lines,
-		Previous:  req.GetPrevious(),
+		Previous:  previous,
 	}).Stream(ctx)
 	if err != nil {
-		return nil, s.tailLogsOpenError(err)
+		if ctx.Err() != nil {
+			return nil, false, false, status.Error(codes.DeadlineExceeded, "logs_open_timeout")
+		}
+		return nil, false, false, s.tailLogsOpenError(err)
 	}
 	defer logStream.Close()
-	data, truncated, err := readLogTail(logStream, int(maxBytes), tailLogsReadLimit)
+	data, truncated, exceeded, err := readLogTail(logStream, maxBytes, tailLogsReadLimit)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, status.Error(codes.DeadlineExceeded, "logs_read_timeout")
+			return nil, false, false, status.Error(codes.DeadlineExceeded, "logs_read_timeout")
 		}
-		return nil, status.Error(codes.Internal, "logs_stream_error")
+		return nil, false, false, status.Error(codes.Internal, "logs_stream_error")
 	}
-	return &runnerv1.TailWorkloadLogsResponse{Data: data, Truncated: truncated, MaxBytes: maxBytes}, nil
+	return data, truncated, exceeded, nil
 }
 
 // tailLogsOpenError maps a refused log request. The kubelet answers BadRequest
@@ -182,16 +208,16 @@ func (s *Server) tailLogsOpenError(err error) error {
 	return grpcErrorFromKube(s.logger, err, codes.Internal)
 }
 
-// readLogTail keeps the newest maxBytes of reader. Reading stops at readLimit,
-// which also counts as truncation: the kept bytes then end where reading did.
-func readLogTail(reader io.Reader, maxBytes, readLimit int) ([]byte, bool, error) {
+// readLogTail keeps the newest maxBytes of reader. Reading stops at readLimit;
+// exceeded then reports that the kept bytes end where reading did, not where
+// the output does.
+func readLogTail(reader io.Reader, maxBytes, readLimit int) (tail []byte, truncated, exceeded bool, err error) {
 	if maxBytes <= 0 {
-		return nil, false, fmt.Errorf("max bytes must be positive")
+		return nil, false, false, fmt.Errorf("max bytes must be positive")
 	}
-	tail := make([]byte, 0, maxBytes)
+	tail = make([]byte, 0, maxBytes)
 	buf := make([]byte, 32*1024)
 	read := 0
-	truncated := false
 	for {
 		n, err := reader.Read(buf)
 		if n > 0 {
@@ -209,13 +235,13 @@ func readLogTail(reader io.Reader, maxBytes, readLimit int) ([]byte, bool, error
 			}
 		}
 		if errors.Is(err, io.EOF) {
-			return tail, truncated, nil
+			return tail, truncated, false, nil
 		}
 		if err != nil {
-			return nil, false, err
+			return nil, false, false, err
 		}
 		if read >= readLimit {
-			return tail, true, nil
+			return tail, true, true, nil
 		}
 	}
 }
