@@ -100,6 +100,126 @@ func (s *Server) StreamWorkloadLogs(req *runnerv1.StreamWorkloadLogsRequest, str
 	}
 }
 
+const (
+	// tailLogsMaxBytes is the runner's ceiling on TailWorkloadLogs.max_bytes.
+	tailLogsMaxBytes = 256 * 1024
+	// tailLogsDefaultLines and tailLogsMaxLines bound the kubelet's own tail.
+	tailLogsDefaultLines = 2000
+	tailLogsMaxLines     = 10000
+	// tailLogsReadLimit stops reading a backend tail whose lines are huge. The
+	// kubelet's rotated log file already bounds it; this keeps the call bounded
+	// even when that setting is raised.
+	tailLogsReadLimit = 16 * 1024 * 1024
+	tailLogsTimeout   = 30 * time.Second
+)
+
+// TailWorkloadLogs reads a bounded, non-following snapshot of a container's
+// newest output. Only the newest max_bytes cross the wire, whatever the kubelet
+// returns for tail_lines. A waiting container or an absent previous instance
+// has no output to read and answers FailedPrecondition, not an empty success,
+// so evidence can say why it holds none.
+// @see api::proto/agynio/api/runner/v1/runner
+func (s *Server) TailWorkloadLogs(ctx context.Context, req *runnerv1.TailWorkloadLogsRequest) (*runnerv1.TailWorkloadLogsResponse, error) {
+	workloadID := strings.TrimSpace(req.GetWorkloadId())
+	if workloadID == "" {
+		return nil, status.Error(codes.InvalidArgument, "workload_id_required")
+	}
+	containerName := strings.TrimSpace(req.GetContainerName())
+	if containerName == "" {
+		return nil, status.Error(codes.InvalidArgument, "container_name_required")
+	}
+	maxBytes := req.GetMaxBytes()
+	if maxBytes == 0 {
+		return nil, status.Error(codes.InvalidArgument, "max_bytes_required")
+	}
+	if maxBytes > tailLogsMaxBytes {
+		maxBytes = tailLogsMaxBytes
+	}
+	lines := int64(req.GetTailLines())
+	if lines == 0 {
+		lines = tailLogsDefaultLines
+	}
+	if lines > tailLogsMaxLines {
+		lines = tailLogsMaxLines
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, tailLogsTimeout)
+	defer cancel()
+	podName := podNameFromID(workloadID)
+	pod, err := s.clientset.CoreV1().Pods(s.namespace).Get(ctx, podName, metav1.GetOptions{})
+	if err != nil {
+		return nil, grpcErrorFromKube(s.logger, err, codes.Internal)
+	}
+	if !podHasContainer(pod, containerName) {
+		return nil, status.Error(codes.NotFound, "container_not_found")
+	}
+	logStream, err := s.clientset.CoreV1().Pods(s.namespace).GetLogs(podName, &corev1.PodLogOptions{
+		Container: containerName,
+		TailLines: &lines,
+		Previous:  req.GetPrevious(),
+	}).Stream(ctx)
+	if err != nil {
+		return nil, s.tailLogsOpenError(err)
+	}
+	defer logStream.Close()
+	data, truncated, err := readLogTail(logStream, int(maxBytes), tailLogsReadLimit)
+	if err != nil {
+		if ctx.Err() != nil {
+			return nil, status.Error(codes.DeadlineExceeded, "logs_read_timeout")
+		}
+		return nil, status.Error(codes.Internal, "logs_stream_error")
+	}
+	return &runnerv1.TailWorkloadLogsResponse{Data: data, Truncated: truncated, MaxBytes: maxBytes}, nil
+}
+
+// tailLogsOpenError maps a refused log request. The kubelet answers BadRequest
+// when a container has no output to read, e.g. "container ... is waiting to
+// start" or no previous terminated instance; that is a state, not a fault.
+func (s *Server) tailLogsOpenError(err error) error {
+	if apierrors.IsBadRequest(err) {
+		return status.Error(codes.FailedPrecondition, formatKubeError("logs_unavailable", kubeStatusMessage(err)))
+	}
+	return grpcErrorFromKube(s.logger, err, codes.Internal)
+}
+
+// readLogTail keeps the newest maxBytes of reader. Reading stops at readLimit,
+// which also counts as truncation: the kept bytes then end where reading did.
+func readLogTail(reader io.Reader, maxBytes, readLimit int) ([]byte, bool, error) {
+	if maxBytes <= 0 {
+		return nil, false, fmt.Errorf("max bytes must be positive")
+	}
+	tail := make([]byte, 0, maxBytes)
+	buf := make([]byte, 32*1024)
+	read := 0
+	truncated := false
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			read += n
+			chunk := buf[:n]
+			if len(chunk) >= maxBytes {
+				truncated = truncated || len(tail) > 0 || len(chunk) > maxBytes
+				tail = append(tail[:0], chunk[len(chunk)-maxBytes:]...)
+			} else if overflow := len(tail) + len(chunk) - maxBytes; overflow > 0 {
+				truncated = true
+				tail = append(tail[:0], tail[overflow:]...)
+				tail = append(tail, chunk...)
+			} else {
+				tail = append(tail, chunk...)
+			}
+		}
+		if errors.Is(err, io.EOF) {
+			return tail, truncated, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+		if read >= readLimit {
+			return tail, true, nil
+		}
+	}
+}
+
 func podExists(ctx context.Context, clientset kubernetes.Interface, namespace, name string) (bool, error) {
 	if _, err := clientset.CoreV1().Pods(namespace).Get(ctx, name, metav1.GetOptions{}); err != nil {
 		if apierrors.IsNotFound(err) {
