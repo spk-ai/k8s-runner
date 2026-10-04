@@ -8,7 +8,7 @@ managed:
 
 inputs:
   - git_repo: https://github.com/spk-ai/api.git
-    ref: ce64da8680c39a13f7174c3146b38f3bfcc03037
+    ref: f62e2ad47a5ea5451d88c3cc0138f73be708eb55
     subdir: proto
     paths:
       - agynio/api/runner/v1
