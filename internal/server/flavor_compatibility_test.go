@@ -69,7 +69,7 @@ func TestFlavorPreservesExplicitAndSupportingBounds(t *testing.T) {
 
 func TestInvalidFlavorFailsBeforeKubernetesAccess(t *testing.T) {
 	for _, bounded := range []bool{false, true} {
-		for _, change := range []string{"unknown", "partial-main", "negative", "zero", "fractional-cpu", "request-over-limit", "partial-sidecar"} {
+		for _, change := range []string{"unknown", "partial-main", "negative", "zero", "fractional-cpu", "request-over-limit", "partial-sidecar", "native-device", "zero-devices", "root-group"} {
 			t.Run(map[bool]string{false: "legacy", true: "bounded"}[bounded]+"/"+change, func(t *testing.T) {
 				client := fake.NewSimpleClientset()
 				catalog := testCatalog()
@@ -95,6 +95,12 @@ func TestInvalidFlavorFailsBeforeKubernetesAccess(t *testing.T) {
 					catalog.Flavors[0].Resources.RequestsCPU = "3"
 				case "partial-sidecar":
 					catalog.Flavors[0].SidecarResources.LimitsMemory = ""
+				case "native-device":
+					catalog.Flavors[0].Devices = []config.DeviceRequest{{Resource: "memory", Count: 1}}
+				case "zero-devices":
+					catalog.Flavors[0].Devices = []config.DeviceRequest{{Resource: "squat.ai/kvm", Count: 0}}
+				case "root-group":
+					catalog.Flavors[0].SupplementalGroups = config.SupplementalGroups{0}
 				}
 				s := New(Options{Clientset: client, Namespace: "workloads", Logger: zap.NewNop(), Catalog: catalog, SupportingContainerResources: supportingResources()})
 				if _, err := s.StartWorkload(context.Background(), req); status.Code(err) != codes.InvalidArgument {

@@ -90,6 +90,14 @@ func runWithKubeClient(newClient func() (*kube.Client, error)) error {
 	})
 	logger.Info("workload pod security", zap.String("profile", string(cfg.PodSecurity.Profile)),
 		zap.Int64("run_as_user", cfg.PodSecurity.RunAsUser), zap.Strings("allowed_capabilities", cfg.PodSecurity.AllowedCapabilities))
+	// runners.v1.FlavorEntry carries a flavor's sizes only, so its devices
+	// are not in the catalog report: they are logged here and are visible on
+	// every Pod built from the flavor.
+	for _, flavor := range cfg.Catalog.Flavors {
+		if summary := flavor.DeviceSummary(); len(summary) > 0 {
+			logger.Info("flavor devices", zap.String("flavor", flavor.Name), zap.Strings("devices", summary))
+		}
+	}
 	if cfg.CapabilityImplementations.Docker != "" && !cfg.DockerAvailable() {
 		logger.Warn("docker capability implementation ignored: the restricted workload profile refuses it",
 			zap.String("implementation", string(cfg.CapabilityImplementations.Docker)))

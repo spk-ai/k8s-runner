@@ -127,6 +127,11 @@ catalog:
         requestsMemory: "64Mi"
         limitsCpu: "500m"
         limitsMemory: "256Mi"
+    # A flavor may also request node devices for its main container (equal
+    # requests and limits of a device plugin's extended resource) and add host
+    # groups to the Pod, for example /dev/kvm for an Android emulator:
+    #   devices: [{resource: squat.ai/kvm, count: 1}]
+    #   supplementalGroups: [994]   # the node's kvm GID
 
   storageClasses:
     # An empty storageClassName uses the cluster default, which is what
