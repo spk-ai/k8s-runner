@@ -1,0 +1,59 @@
+//go:build e2e && svc_k8s_runner
+
+package tests
+
+import (
+	"strings"
+	"testing"
+
+	runnerv1 "github.com/agynio/e2e/suites/go-core/.gen/go/agynio/api/runner/v1"
+	"github.com/stretchr/testify/require"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+// The e2e-device flavor and its fake extended resource come from
+// .github/e2e/device-flavor.py. No device plugin backs it, so this proves the
+// Pod the runner builds for a device flavor schedules and runs with the group,
+// and that a sized flavor without devices gets neither -- not /dev/kvm.
+func TestNativeFlavorDevices(t *testing.T) {
+	const fakeDevice corev1.ResourceName = "e2e.agyn.dev/fake-device"
+	client := newK8sRunnerClient(t)
+	pods := kubeClientset(t).CoreV1().Pods("agyn-workloads")
+
+	for _, flavor := range []string{"e2e-device", "ram-4gb"} {
+		t.Run(flavor, func(t *testing.T) {
+			ctx, cancel := testContext(t)
+			t.Cleanup(cancel)
+			req := sleepWorkloadRequest()
+			req.Flavor = flavor
+			started := startWorkloadWithCleanup(t, ctx, client, req)
+			waitRunning(t, ctx, client, started.GetId())
+
+			pod, err := pods.Get(ctx, podNameFromID(started.GetId()), metav1.GetOptions{})
+			require.NoError(t, err)
+			main := pod.Spec.Containers[0]
+			result := collectExecOutput(t, ctx, client, &runnerv1.ExecStartRequest{
+				TargetId: started.GetContainers().GetMain(), CommandArgv: []string{"id", "-G"},
+			})
+			require.NotNil(t, result.exit)
+			require.Equal(t, int32(0), result.exit.GetExitCode())
+			groups := strings.Fields(result.stdout)
+
+			if flavor != "e2e-device" {
+				require.NotContains(t, main.Resources.Requests, fakeDevice)
+				require.NotContains(t, main.Resources.Limits, fakeDevice)
+				require.NotContains(t, groups, "4242")
+				return
+			}
+			for name, list := range map[string]corev1.ResourceList{"requests": main.Resources.Requests, "limits": main.Resources.Limits} {
+				got, ok := list[fakeDevice]
+				require.Truef(t, ok && got.Cmp(resource.MustParse("1")) == 0, "main %s = %v", name, list)
+			}
+			require.NotNil(t, pod.Spec.SecurityContext)
+			require.Equal(t, []int64{4242}, pod.Spec.SecurityContext.SupplementalGroups)
+			require.Contains(t, groups, "4242", "main process groups: %q", result.stdout)
+		})
+	}
+}
