@@ -103,6 +103,29 @@ func TestRestrictedProfileBuildsAdmissiblePods(t *testing.T) {
 	}
 }
 
+// The Android QA flavor on the explicit-proxy task shape: /dev/kvm through
+// the device plugin's extended resource on the main container and the host kvm
+// group on the Pod, with every restricted field still in place.
+func TestRestrictedDeviceFlavorIsAdmissible(t *testing.T) {
+	client := newIdentityClientset()
+	s := podSecurityServer(client, restrictedPolicy())
+	s.catalog = deviceCatalog()
+	req := explicitProxyTaskRequest()
+	req.Flavor = "qa-android"
+	pod := startFixturePod(t, s, client, req)
+	assertRestrictedPod(t, pod)
+	if groups := pod.Spec.SecurityContext.SupplementalGroups; !slices.Equal(groups, []int64{994}) {
+		t.Fatalf("supplementalGroups = %v, want [994]", groups)
+	}
+	for _, c := range append(slices.Clone(pod.Spec.InitContainers), pod.Spec.Containers...) {
+		requested, limited := hasDevice(c)
+		if want := c.Name == "agent-main"; requested != want || limited != want {
+			t.Fatalf("%s device request/limit = %v/%v, want %v", c.Name, requested, limited, want)
+		}
+	}
+	checkPodSecurityFixture(t, "allowed-device-flavor", pod)
+}
+
 func TestRestrictedProfileExplicitProxyShape(t *testing.T) {
 	client := newIdentityClientset()
 	pod := startFixturePod(t, podSecurityServer(client, restrictedPolicy()), client, explicitProxyTaskRequest())

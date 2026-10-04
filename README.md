@@ -382,6 +382,19 @@ For a Kata implementation selected through `CAPABILITY_IMPLEMENTATIONS`, the
 cluster must provide the matching RuntimeClass and schedule onto KVM-capable
 nodes. This cannot be validated on local k3d/mac setups.
 
+## Flavor devices
+
+A catalog flavor's `devices` and `supplementalGroups` give its main container a
+node device without privileges: the device plugin injects the device for the
+extended-resource request, and the group opens it as the non-root workload
+user. Validation is in [catalog.go](internal/config/catalog.go); the Pod shape is
+in [flavor.go](internal/server/flavor.go) and the restricted fixture
+`allowed-device-flavor`. The cluster must run the device plugin and, for KVM,
+a runtime whose guests have nested virtualization; the group must be the
+device node's GID on every node that advertises the resource. The catalog
+report carries sizes only, so the platform lists a device flavor without its
+devices; the runner logs them at startup.
+
 ## Workload ResourceQuota
 
 Configure `workloadResourceQuota` using [chart values](charts/k8s-runner/values.yaml)

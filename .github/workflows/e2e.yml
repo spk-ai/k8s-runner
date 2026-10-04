@@ -57,6 +57,11 @@ jobs:
       - name: Grant the source chart's workload rules with the Secret sweep
         run: python3 .github/e2e/workload-rbac.py
 
+      # A catalog flavor with a fake extended resource the script advertises
+      # on the VM node; no device plugin or KVM is involved.
+      - name: Offer a device flavor without a device
+        run: python3 .github/e2e/device-flavor.py
+
       - name: Deploy k8s-runner from source
         id: deploy
         run: devspace run deploy

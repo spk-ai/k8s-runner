@@ -181,6 +181,7 @@ func (s *Server) startWorkload(ctx context.Context, req *runnerv1.StartWorkloadR
 	}
 
 	s.applyPodSecurity(pod)
+	applySupplementalGroups(pod, flavor.supplementalGroups)
 
 	if req.DnsConfig != nil && len(req.DnsConfig.Nameservers) > 0 {
 		pod.Spec.DNSPolicy = corev1.DNSNone
@@ -861,6 +862,7 @@ func buildContainers(req *runnerv1.StartWorkloadRequest, volumes []corev1.Volume
 		return nil, nil, nil, err
 	}
 	applyResources(&mainContainer, flavor.main)
+	applyDevices(&mainContainer, flavor.devices)
 	containers = append(containers, mainContainer)
 	nameLookup[mainContainer.Name] = struct{}{}
 
