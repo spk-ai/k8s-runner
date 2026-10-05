@@ -50,7 +50,9 @@ func (d *recordingDialer) calls() []string {
 }
 
 func TestDirectEgressReachesOnlyPublicAddresses(t *testing.T) {
-	deny, err := ParseDeny([]string{"95.216.29.229", "203.0.114.0/24"})
+	// RFC 5737 ranges are already non-public, so the deny entries here are
+	// public addresses next to TEST-NET-3.
+	deny, err := ParseDeny([]string{"203.0.115.7", "203.0.114.0/24"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +63,7 @@ func TestDirectEgressReachesOnlyPublicAddresses(t *testing.T) {
 		"169.254.169.254": false, "127.0.0.1": false, "0.0.0.0": false, "192.0.2.1": false, "198.18.0.1": false,
 		"224.0.0.1": false, "255.255.255.255": false, "::1": false, "fd00::1": false, "fe80::1": false,
 		"::ffff:10.0.0.1": false, "::ffff:93.184.215.14": true, "64:ff9b::a00:1": false,
-		"95.216.29.229": false, "95.216.29.228": true, "203.0.114.7": false,
+		"203.0.115.7": false, "203.0.115.6": true, "203.0.114.7": false,
 	} {
 		if got := direct.Public(netip.MustParseAddr(address)); got != want {
 			t.Errorf("Public(%s) = %t, want %t", address, got, want)
@@ -86,11 +88,11 @@ func TestDirectEgressCarriesOnlyUninterceptedPublicDestinations(t *testing.T) {
 			"public.example":   {"93.184.215.14"},
 			"internal.example": {"10.43.0.10"},
 			"mixed.example":    {"10.0.0.1", "2606:2800:21f:cb07:6820:80da:af6b:8b2c", "93.184.215.15"},
-			"node.example":     {"95.216.29.229"},
+			"node.example":     {"203.0.115.7"},
 			"flaky.example":    {"temporary"},
 		},
 		Dialer: directDialer,
-		Deny:   []netip.Prefix{netip.MustParsePrefix("95.216.29.229/32")},
+		Deny:   []netip.Prefix{netip.MustParsePrefix("203.0.115.7/32")},
 	}})
 	server := httptest.NewServer(p)
 	defer server.Close()
